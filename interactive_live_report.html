@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>MTU Interactive Simulation Report (Live)</title>
+<style type="text/css">
+    body {font-family:"Trebuchet MS", Arial, Helvetica, sans-serif;}
+    .results tr:hover {background-color:#f2f2f2 !important}
+    .results tbody tr:nth-child(even) {background:#f2f2f2 !important}
+    .main-container {width:90%; max-width:1200px; padding-left:20px; padding-right:20px; margin:0 auto; position:relative; padding-top:15px;}
+    h1, h2, h3 {text-align:center; padding-bottom:15px;}
+    table {width:100%; margin:2% auto; border:1px solid #ddd; border-collapse:collapse; text-align:center; vertical-align:middle; display:table; table-layout:auto;}
+    th, td {border:1px solid #ddd; padding:8px;}
+    th {background-color:#3D1067; text-transform:uppercase; color:white;}
+    .rerun-console { border: 1px solid #ccc; padding: 15px; margin-bottom: 20px; background-color: #f9f9f9; }
+    .rerun-console h2 { text-align: left; margin-top: 0; padding-bottom: 10px; border-bottom: 1px solid #eee; }
+    .console-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; }
+    .console-item { display: flex; flex-direction: column; }
+    .console-item label { margin-bottom: 5px; font-weight: bold; }
+    .console-item input[type="text"], .console-item input[type="number"] { padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+    .console-item input[type="checkbox"] { margin-right: 5px; }
+    .button-bar { margin-top: 15px; text-align: right; }
+    .button-bar button { padding: 10px 15px; background-color: #007bff; color: white; border: none; cursor: pointer; border-radius: 4px; margin-left: 10px; }
+    .button-bar button:hover { background-color: #0056b3; }
+    .status-P { color: green; font-weight: bold; }
+    .status-F { color: red; font-weight: bold; }
+    .status-K { color: orange; font-weight: bold; }
+    .status-D { color: blue; font-weight: bold; }
+    .status-Q { color: #777; }
+</style>
+</head>
+<body>
+<div class="main-container">
+<h1 align="center">MTU Interactive Simulation Report (Live Status)</h1>
+<h3 align="center">Last Updated: 2025-05-21 16:52:33 (Total Runtime: 00:00:05)</h3>
+<h3 align="center">Branch: /scratch/project/M0001/users/wenxuan.chen/mtu_dv/work/msim_report_v3p0_2/mtu-vcs</h3>
+<h3 align="center">Simulator: VCS</h3>
+
+<div class="rerun-console">
+    <h2>Rerun Console</h2>
+    <div class="console-grid">
+        <div class="console-item">
+            <label><input type="checkbox" id="openCoverage"> Open Coverage</label>
+        </div>
+        <div class="console-item">
+            <label><input type="checkbox" id="rebuildCases"> Rebuild All Selected Cases</label>
+        </div>
+        <div class="console-item">
+            <label><input type="checkbox" id="includeWaveform"> Include Waveform in Rebuild</label>
+        </div>
+        <div class="console-item">
+            <label for="simTime">Simulation Time (hours):</label>
+            <input type="number" id="simTime" value="0" min="0">
+        </div>
+        <div class="console-item">
+            <label for="dirOption">Directory (-dir):</label>
+            <input type="text" id="dirOption" placeholder="e.g., my_rerun_dir">
+        </div>
+        <div class="console-item">
+            <label for="elabOpts">-elab_opts:</label>
+            <input type="text" id="elabOpts" placeholder="e.g., +define+ABC">
+        </div>
+        <div class="console-item">
+            <label for="vloganOpts">-vlogan_opts:</label>
+            <input type="text" id="vloganOpts" placeholder="e.g., +incdir+../src">
+        </div>
+        <div class="console-item">
+            <label for="runOpts">-run_opts:</label>
+            <input type="text" id="runOpts" placeholder="e.g., +UVM_TESTNAME=my_test">
+        </div>
+    </div>
+    <div class="button-bar">
+        <button onclick="selectAllNonPassed()">Select All Non-Passed Cases</button>
+        <button onclick="runRegression()">Run Selected Cases</button>
+    </div>
+</div>
+
+<h2 align="center">Run Job Status Summary</h2>
+<p style="text-align:justify" align="justify"><strong>Overall Run Job Progress: 2/2 run jobs completed (100.00%)</strong></p>
+<ul>
+<li>Passed: 0</li>
+<li>Failed: 0</li>
+<li>Killed: 2</li>
+<li>Dispatched/Running: 0</li>
+<li>Queued: 0</li>
+<li>Pending/Not Scheduled: 0</li>
+</ul>
+
+<h2 align="center">Detailed Run Job Statuses</h2>
+<table id="detailedStatusTable" class="results">
+<thead>
+<tr>
+<th align="left">Job Name (Test Seed)</th>
+<th align="center">Status</th>
+<th align="center">Pass Rate</th>
+<th align="left">Log Path</th>
+<th align="left">Error Hint (if Failed/Killed)</th>
+<th align="center">Select for Rerun</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">mtu_ch1_write_updata_write_match_write_transfer_test (Seed: 2309781139)</td>
+<td align="center" class="status-K">K</td>
+<td align="center">0%</td>
+<td align="left"><code>sim/mtu_ch1_write_updata_write_match_write_transfer_test.1/2025-05-21_16-52-27-549608/run.log</code></td>
+<td align="left">Job killed most likely because its dependent job failed.</td>
+<td align="center"><input type="checkbox" class="rerun-checkbox" data-casename="mtu_ch1_write_updata_write_match_write_transfer_test" data-seed="2309781139"></td>
+</tr>
+<tr>
+<td align="left">mtu_ch1_write_updata_write_match_write_transfer_test (Seed: 3668249552)</td>
+<td align="center" class="status-K">K</td>
+<td align="center">0%</td>
+<td align="left"><code>sim/mtu_ch1_write_updata_write_match_write_transfer_test.0/2025-05-21_16-52-27-549608/run.log</code></td>
+<td align="left">Job killed most likely because its dependent job failed.</td>
+<td align="center"><input type="checkbox" class="rerun-checkbox" data-casename="mtu_ch1_write_updata_write_match_write_transfer_test" data-seed="3668249552"></td>
+</tr>
+<!-- This summary row should ideally be handled differently if it's part of the data to be selected -->
+<!-- For now, I'm assuming it's not a selectable case -->
+<tr>
+<td align="left"><strong>Total Run Jobs</strong></td>
+<td align="center">Completed: 2</td>
+<td align="center"><strong>0.00%</strong></td>
+<td align="left">(2 total logs)</td>
+<td align="left">Failed/Killed: 2</td>
+<td align="center"></td> <!-- No checkbox for summary row -->
+</tr>
+</tbody>
+</table>
+
+<h2 align="center">Failure Buckets (Live Update)</h2>
+<ul>
+<li><strong>Bucket: <code>Job killed most likely because its dependent job failed.</code></strong> (2 failures):
+<ul>
+<li>Test <code>mtu_ch1_write_updata_write_match_write_transfer_test</code> (2 failing seeds):
+<ul>
+<li>
+<p style="text-align:justify" align="justify">mtu_ch1_write_updata_write_match_write_transfer_test.0.3668249552<br>
+Log: <code>/scratch/project/M0001/users/wenxuan.chen/mtu_dv/work/msim_report_v3p0_2/mtu-vcs/sim/mtu_ch1_write_updata_write_match_write_transfer_test.0/2025-05-21_16-52-27-549608/run.log</code></p>
+</li>
+<li>
+<p style="text-align:justify" align="justify">mtu_ch1_write_updata_write_match_write_transfer_test.1.2309781139<br>
+Log: <code>/scratch/project/M0001/users/wenxuan.chen/mtu_dv/work/msim_report_v3p0_2/mtu-vcs/sim/mtu_ch1_write_updata_write_match_write_transfer_test.1/2025-05-21_16-52-27-549608/run.log</code></p>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</div>
+
+<script>
+function selectAllNonPassed() {
+    console.log("selectAllNonPassed called");
+    const checkboxes = document.querySelectorAll('#detailedStatusTable tbody .rerun-checkbox');
+    const rows = document.querySelectorAll('#detailedStatusTable tbody tr');
+
+    rows.forEach((row, index) => {
+        // Ensure we don't try to process a summary row if it doesn't have the checkbox
+        if (checkboxes[index]) {
+            const statusCell = row.cells[1]; // Assuming status is the second cell
+            if (statusCell) {
+                const status = statusCell.innerText.trim().toUpperCase();
+                // P = PASSED, F = Failed, K = Killed, D = Dispatched/Running, Q = Queued
+                if (status !== 'P') {
+                    checkboxes[index].checked = true;
+                } else {
+                    checkboxes[index].checked = false; // Optionally uncheck passed cases
+                }
+            }
+        }
+    });
+}
+
+function runRegression() {
+    console.log("runRegression called");
+    const selectedCasesToRerun = [];
+    document.querySelectorAll('#detailedStatusTable tbody .rerun-checkbox:checked').forEach(checkbox => {
+        // Extracting full job name from the first cell of the row
+        const row = checkbox.closest('tr');
+        const jobNameCell = row.cells[0];
+        if (jobNameCell) {
+            // Attempt to get a cleaner case name, removing seed if present in the display
+            let fullJobName = jobNameCell.innerText.trim();
+            let caseName = checkbox.dataset.casename || fullJobName.split(' (Seed:')[0].trim(); // Use data-casename if available
+            
+            selectedCasesToRerun.push(caseName); // Storing the base case name
+        }
+    });
+
+    // TODO: Determine vcsContext dynamically if possible, or have it set by the HTML generator
+    // Example: Extract from an element, or a global JS var set by the template
+    // For now, a placeholder. If your report is always for 'mtu-vcs' based on the H3:
+    let vcsContext = "mtu-vcs"; // Placeholder - THIS NEEDS TO BE SET CORRECTLY
+    const branchHeader = Array.from(document.querySelectorAll('h3')).find(h3 => h3.innerText.startsWith("Branch:"));
+    if (branchHeader) {
+        const branchPath = branchHeader.innerText.replace("Branch: ", "").trim();
+        const pathParts = branchPath.split('/');
+        const potentialVcsDir = pathParts[pathParts.length - 1];
+        if (potentialVcsDir.endsWith("-vcs")) {
+            vcsContext = potentialVcsDir;
+        } else {
+            console.warn("Could not reliably determine VCS context from Branch H3. Using placeholder:", vcsContext);
+        }
+    } else {
+        console.warn("Branch H3 not found. Using placeholder VCS context:", vcsContext);
+    }
+    console.log("Using VCS Context:", vcsContext);
+
+
+    const rerunOptions = {
+        openCoverage: document.getElementById('openCoverage').checked,
+        rebuildCases: document.getElementById('rebuildCases').checked,
+        includeWaveform: document.getElementById('includeWaveform').checked,
+        simTimeHours: document.getElementById('simTime').value,
+        dirOption: document.getElementById('dirOption').value.trim(),
+        elabOpts: document.getElementById('elabOpts').value.trim(),
+        vloganOpts: document.getElementById('vloganOpts').value.trim(),
+        runOpts: document.getElementById('runOpts').value.trim(),
+        selectedCases: selectedCasesToRerun, // This is just a list of names
+        vcsContext: vcsContext // Adding the determined VCS context
+    };
+
+    console.log("Rerun Options (including vcsContext):", JSON.stringify(rerunOptions, null, 2));
+
+    if (rerunOptions.selectedCases.length === 0) {
+        alert("No cases selected for rerun.");
+        return;
+    }
+
+    // For now, we'll just display the collected data.
+    // In a real implementation, this data would be sent to a backend (e.g., Python script)
+    // or used to generate a command for the user to run.
+    // Send data to the Flask backend
+    fetch('http://localhost:5000/rerun', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(rerunOptions),
+    })
+    .then(response => response.json())
+    .then(data => {
+        console.log('Success from backend:', data);
+        alert(`Server response: ${data.message}`);
+        // Optionally, update the page or provide more feedback based on 'data'
+    })
+    .catch((error) => {
+        console.error('Error sending data to backend:', error);
+        alert(`Error communicating with the rerun server. Is it running? Details: ${error}`);
+    });
+}
+</script>
+</body>
+</html>

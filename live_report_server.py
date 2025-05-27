@@ -7,7 +7,16 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS # For handling Cross-Origin Resource Sharing (pip install Flask-CORS)
 
 app = Flask(__name__)
-CORS(app) # Enable CORS for all routes, helpful if HTML is not served by Flask
+# More specific CORS configuration for Strategy 3 (local files)
+# Allow requests from 'null' (for file:///) and typical local dev origins for the /rerun endpoint
+CORS(app, resources={
+    r"/rerun": {
+        "origins": ["null", "file://", "http://localhost", "http://127.0.0.1"] 
+                   # Add other specific origins if needed, e.g., http://localhost:xxxx if served by another tool
+    }
+})
+# Note: Using "origins": "*" is generally too permissive for production but can be used for broad testing.
+# The 'null' origin is key for file:/// access. Some browsers might also need 'file://'.
 
 # --- Configuration (Adjust as needed) ---
 # Assuming PRJ_ICDIR is set in the environment where this server runs
@@ -82,93 +91,99 @@ def prepare_rerun_hjson_files(options, temp_rerun_dir):
     if not PRJ_ICDIR:
         raise ValueError("PRJ_ICDIR is not set. Cannot prepare HJSON files.")
 
-    ts_dir_path = os.path.join(PRJ_ICDIR, 'dv', 'sim_ctrl', 'ts') # Base for original HJSONs
-
-    # 1. Process all.hjson and its 'use_cfgs'
-    original_all_hjson_path = os.path.join(ts_dir_path, 'all.hjson')
+    ts_dir_path = os.path.join(PRJ_ICDIR, 'dv', 'sim_ctrl', 'ts')
     temp_all_hjson_path = os.path.join(temp_rerun_dir, 'all.hjson')
+    vcs_context = options.get('vcsContext') 
+    if not vcs_context:
+        raise ValueError("vcsContext not provided in options, critical for HJSON processing.")
+
+    hjson_name_prefix = vcs_context.replace('-vcs', '') 
+
+    original_all_hjson_path = os.path.join(ts_dir_path, 'all.hjson')
+    all_hjson_data = {}
+    temp_use_cfgs = [] 
 
     if not os.path.exists(original_all_hjson_path):
-        raise FileNotFoundError(f"Original all.hjson not found at {original_all_hjson_path}")
-
-    with open(original_all_hjson_path, 'r') as file:
-        all_hjson_data = hjson.load(file)
-    
-    original_use_cfgs = all_hjson_data.get('use_cfgs', [])
-    temp_use_cfgs = []
-
-    for hjson_relative_path_from_proj_root in original_use_cfgs:
-        # Path like '{proj_root}/dv/sim_ctrl/ts/common/common.hjson'
-        path_part = hjson_relative_path_from_proj_root.replace('{proj_root}/', '')
-        original_cfg_path = os.path.join(PRJ_ICDIR, path_part)
-
-        # Destination path in temp_rerun_dir, maintaining relative structure from ts_dir_path
-        relative_to_ts_dir = os.path.relpath(original_cfg_path, ts_dir_path)
-        temp_cfg_path = os.path.join(temp_rerun_dir, relative_to_ts_dir)
+        print(f"Warning: Original all.hjson not found at {original_all_hjson_path}. Generating a temporary one.")
         
-        temp_cfg_dir = os.path.dirname(temp_cfg_path)
-        if not os.path.exists(temp_cfg_dir):
-            os.makedirs(temp_cfg_dir, exist_ok=True)
-        
-        if not os.path.exists(original_cfg_path):
-            raise FileNotFoundError(f"use_cfgs file not found: {original_cfg_path}")
-        shutil.copyfile(original_cfg_path, temp_cfg_path)
-        
-        # Path for use_cfgs in temp all.hjson should be relative to PRJ_ICDIR
-        # but pointing to the file within temp_rerun_dir (which is inside ts_dir_path/temp_reruns/)
-        # The structure inside temp_rerun_dir mirrors the structure from ts_dir_path downwards.
-        # So, the {proj_root}/dv/sim_ctrl/ts/ part remains, and the rest points into temp_rerun_dir.
-        # Example: original {proj_root}/dv/sim_ctrl/ts/common/common.hjson
-        # becomes {proj_root}/dv/sim_ctrl/ts/temp_reruns/current_rerun_hjsons/common/common.hjson
-        # This requires careful path construction.
-        # The path stored in use_cfgs should be resolvable by msim when CWD is dv/sim_ctrl/ts
-        # and it looks for temp_reruns/current_rerun_hjsons/...
-        
-        # Path relative from PRJ_ICDIR to the copied file in temp_rerun_dir
-        path_in_temp_from_prj_icdir = os.path.relpath(temp_cfg_path, PRJ_ICDIR).replace('\\', '/')
-        temp_use_cfgs.append(f"{{proj_root}}/{path_in_temp_from_prj_icdir}")
+        all_hjson_data['name'] = hjson_name_prefix
+        all_hjson_data['tool'] = 'vcs' # Assuming 'vcs', this might need to be dynamic/configurable
 
-    all_hjson_data['use_cfgs'] = temp_use_cfgs
+        original_ip_hjson_path_in_subdir = os.path.join(ts_dir_path, hjson_name_prefix, f"{hjson_name_prefix}.hjson")
+        original_ip_hjson_path_in_tsdir = os.path.join(ts_dir_path, f"{hjson_name_prefix}.hjson")
+        actual_original_ip_hjson_path = None
+
+        if os.path.exists(original_ip_hjson_path_in_subdir):
+            actual_original_ip_hjson_path = original_ip_hjson_path_in_subdir
+        elif os.path.exists(original_ip_hjson_path_in_tsdir):
+            actual_original_ip_hjson_path = original_ip_hjson_path_in_tsdir
+        else:
+            raise FileNotFoundError(f"IP-specific HJSON {hjson_name_prefix}.hjson not found in {ts_dir_path} or its '{hjson_name_prefix}' subdirectory. Cannot generate temporary all.hjson.")
+
+        relative_to_ts_for_ip_hjson = os.path.relpath(actual_original_ip_hjson_path, ts_dir_path)
+        temp_ip_hjson_path_for_use_cfgs = os.path.join(temp_rerun_dir, relative_to_ts_for_ip_hjson)
+        
+        path_in_temp_from_prj_icdir_for_ip_hjson = os.path.relpath(temp_ip_hjson_path_for_use_cfgs, PRJ_ICDIR).replace('\\', '/')
+        temp_use_cfgs.append(f"{{proj_root}}/{path_in_temp_from_prj_icdir_for_ip_hjson}")
+        all_hjson_data['use_cfgs'] = temp_use_cfgs
+        print(f"Generated temporary all.hjson data: {all_hjson_data}")
+    else: 
+        print(f"Found original all.hjson at {original_all_hjson_path}. Processing it.")
+        with open(original_all_hjson_path, 'r') as file:
+            all_hjson_data = hjson.load(file)
+        
+        original_use_cfgs_from_file = all_hjson_data.get('use_cfgs', [])
+        
+        for hjson_relative_path_from_proj_root in original_use_cfgs_from_file:
+            path_part = hjson_relative_path_from_proj_root.replace('{proj_root}/', '')
+            original_cfg_path = os.path.join(PRJ_ICDIR, path_part)
+            relative_to_ts_dir = os.path.relpath(original_cfg_path, ts_dir_path)
+            temp_cfg_path = os.path.join(temp_rerun_dir, relative_to_ts_dir)
+            temp_cfg_dir = os.path.dirname(temp_cfg_path)
+            if not os.path.exists(temp_cfg_dir):
+                os.makedirs(temp_cfg_dir, exist_ok=True)
+            if not os.path.exists(original_cfg_path):
+                raise FileNotFoundError(f"use_cfgs file not found: {original_cfg_path} (referenced in existing all.hjson)")
+            shutil.copyfile(original_cfg_path, temp_cfg_path)
+            path_in_temp_from_prj_icdir = os.path.relpath(temp_cfg_path, PRJ_ICDIR).replace('\\', '/')
+            temp_use_cfgs.append(f"{{proj_root}}/{path_in_temp_from_prj_icdir}")
+        all_hjson_data['use_cfgs'] = temp_use_cfgs
+
     with open(temp_all_hjson_path, 'w') as file:
         hjson.dump(all_hjson_data, file, indent=4)
-    print(f"Processed and copied all.hjson to {temp_all_hjson_path} with updated use_cfgs.")
+    print(f"Saved all.hjson to {temp_all_hjson_path} with use_cfgs: {all_hjson_data.get('use_cfgs')}")
 
-
-    # 2. Modify the target HJSON file for the selected cases
-    vcs_context = options.get('vcsContext') # e.g., "mtu-vcs"
-    if not vcs_context:
-        raise ValueError("vcsContext not provided in options, cannot determine target HJSON.")
-
-    hjson_filename_prefix = vcs_context.replace('-vcs', '')
-    target_hjson_filename = f"{hjson_filename_prefix}.hjson" # e.g., "mtu.hjson"
-
-    # Determine original path and temp path for the target HJSON
-    # msum.py logic:
-    #   hjson_filename = os.path.basename(hjson_file_path) -> e.g. mtu.hjson
-    #   base_name = os.path.splitext(hjson_filename)[0] -> e.g. mtu
-    #   subdir_path = os.path.join(os.path.dirname(hjson_file_path), base_name) -> e.g. .../temp/mtu
-    #   if os.path.isdir(subdir_path):
-    #       hjson_file_path = os.path.join(subdir_path, hjson_filename) -> .../temp/mtu/mtu.hjson
-    # This implies target HJSONs might be in subdirectories named after themselves (without .hjson)
-
-    original_target_hjson_base_path = os.path.join(ts_dir_path, target_hjson_filename)
-    original_target_hjson_subdir_path = os.path.join(ts_dir_path, hjson_filename_prefix, target_hjson_filename)
+    # 2. Modify the target IP-specific HJSON file for the selected cases
+    # This is the HJSON file that was (or would have been) listed in use_cfgs.
+    original_target_hjson_base_path = os.path.join(ts_dir_path, f"{hjson_name_prefix}.hjson")
+    original_target_hjson_subdir_path = os.path.join(ts_dir_path, hjson_name_prefix, f"{hjson_name_prefix}.hjson")
+    
+    final_original_target_hjson_path = None
+    temp_target_hjson_path = None # This is the path inside temp_rerun_dir
 
     if os.path.exists(original_target_hjson_subdir_path):
-        original_target_hjson_path = original_target_hjson_subdir_path
-        # Path in temp dir should also be in a subdir
-        temp_target_hjson_path = os.path.join(temp_rerun_dir, hjson_filename_prefix, target_hjson_filename)
+        final_original_target_hjson_path = original_target_hjson_subdir_path
+        temp_target_hjson_path = os.path.join(temp_rerun_dir, hjson_name_prefix, f"{hjson_name_prefix}.hjson")
     elif os.path.exists(original_target_hjson_base_path):
-        original_target_hjson_path = original_target_hjson_base_path
-        temp_target_hjson_path = os.path.join(temp_rerun_dir, target_hjson_filename)
+        final_original_target_hjson_path = original_target_hjson_base_path
+        temp_target_hjson_path = os.path.join(temp_rerun_dir, f"{hjson_name_prefix}.hjson")
     else:
-        raise FileNotFoundError(f"Target HJSON file {target_hjson_filename} not found in {ts_dir_path} or its '{hjson_filename_prefix}' subdirectory.")
+        # This check might be redundant if the all.hjson generation logic already confirmed its existence,
+        # but it's good for safety if original all.hjson was used.
+        raise FileNotFoundError(f"Target IP HJSON file {hjson_name_prefix}.hjson not found in {ts_dir_path} or its '{hjson_name_prefix}' subdirectory for modification.")
 
     temp_target_hjson_dir = os.path.dirname(temp_target_hjson_path)
     if not os.path.exists(temp_target_hjson_dir):
         os.makedirs(temp_target_hjson_dir, exist_ok=True)
     
-    shutil.copyfile(original_target_hjson_path, temp_target_hjson_path)
+    # Copy the IP-specific HJSON to its location in the temp directory.
+    # This is crucial because this is the file that will be modified.
+    # If all.hjson was generated, this copy ensures the file pointed to by use_cfgs exists.
+    # If all.hjson existed, this ensures we are modifying a copy of the correct IP HJSON.
+    if not os.path.exists(final_original_target_hjson_path):
+         # This should ideally not be hit if previous checks were done.
+        raise FileNotFoundError(f"Source IP HJSON file for copy operation not found: {final_original_target_hjson_path}")
+    shutil.copyfile(final_original_target_hjson_path, temp_target_hjson_path)
     
     with open(temp_target_hjson_path, 'r') as file:
         target_hjson_data = hjson.load(file)
@@ -176,13 +191,8 @@ def prepare_rerun_hjson_files(options, temp_rerun_dir):
     if "regressions" not in target_hjson_data:
         target_hjson_data["regressions"] = []
     
-    # Ensure selectedCases are just names, not with extensions if msum.py removed them
-    # msum.py: base_case_name = case.split(".")[0]
-    # HTML sends case names as they appear, which might be base names already.
-    # Assuming options['selectedCases'] contains base names.
-    
     new_regression_group = {
-        "name": "rerun",
+        "name": "rerun", 
         "tests": options['selectedCases']
     }
 
@@ -195,7 +205,7 @@ def prepare_rerun_hjson_files(options, temp_rerun_dir):
     with open(temp_target_hjson_path, 'w') as file:
         hjson.dump(target_hjson_data, file, indent=2)
     
-    print(f"Prepared target HJSON for rerun: {temp_target_hjson_path}")
+    print(f"Prepared target IP HJSON for rerun: {temp_target_hjson_path}")
     return temp_all_hjson_path
 
 
@@ -300,10 +310,10 @@ def execute_msim_rerun(options, temp_rerun_dir):
 # --- Flask Routes ---
 @app.route('/')
 def index():
-    # Serve the main HTML file
-    # Assumes interactive_live_report.html is in the same directory as this script
-    # or in a 'templates' subdirectory. For simplicity, let's assume same directory.
-    return send_from_directory('.', 'interactive_live_report.html')
+    # This server's primary role is the /rerun API.
+    # Users will open their HTML report files locally.
+    # This root path can just confirm the server is running.
+    return jsonify({"status": "live_report_server is running", "message": "Access your locally generated interactive HTML report files directly in your browser."})
 
 @app.route('/rerun', methods=['POST'])
 def handle_rerun():

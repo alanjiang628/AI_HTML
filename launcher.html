@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Interactive Report Launcher</title>
+<style type="text/css">
+    body {font-family:"Trebuchet MS", Arial, Helvetica, sans-serif; margin: 20px;}
+    .main-container {width:95%; max-width:1400px; margin:0 auto;}
+    h1, h2, h3 {text-align:center; padding-bottom:15px;}
+    table {width:100%; margin:1% auto; border:1px solid #ddd; border-collapse:collapse; text-align:center; vertical-align:middle; display:table; table-layout:auto;}
+    th, td {border:1px solid #ddd; padding:8px;}
+    th {background-color:#3D1067; text-transform:uppercase; color:white;}
+    .rerun-console { border: 1px solid #ccc; padding: 15px; margin-bottom: 20px; background-color: #f9f9f9; }
+    .rerun-console h2 { text-align: left; margin-top: 0; padding-bottom: 10px; border-bottom: 1px solid #eee; }
+    .console-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; }
+    .console-item { display: flex; flex-direction: column; }
+    .console-item label { margin-bottom: 5px; font-weight: bold; }
+    .console-item input[type="text"], .console-item input[type="number"] { padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+    .console-item input[type="checkbox"] { margin-right: 5px; }
+    .button-bar { margin-top: 15px; text-align: right; }
+    .button-bar button { padding: 10px 15px; background-color: #007bff; color: white; border: none; cursor: pointer; border-radius: 4px; margin-left: 10px; }
+    .button-bar button:hover { background-color: #0056b3; }
+    #reportDisplayArea { border: 1px solid #eee; padding: 10px; margin-top: 20px; background-color: #fff; }
+    /* Styles for dynamically loaded content if needed */
+    #reportDisplayArea .results tr:hover {background-color:#f2f2f2 !important}
+    #reportDisplayArea .results tbody tr:nth-child(even) {background:#f2f2f2 !important}
+    #reportDisplayArea table {width:90%; margin:2% auto; border:1px solid #f2f2f2; border-collapse:collapse; text-align:center; vertical-align:middle; display:table; table-layout:auto}
+    #reportDisplayArea th {padding-top:12px; padding-bottom:12px; background-color:#3D1067; text-transform:uppercase; color:white; border:1px solid #f2f2f2; padding:8px}
+    #reportDisplayArea td {border:1px solid #f2f2f2; padding:8px}
+    .status-P { color: green; font-weight: bold; }
+    .status-F { color: red; font-weight: bold; }
+    .status-K { color: orange; font-weight: bold; }
+    .status-D { color: blue; font-weight: bold; }
+    .status-Q { color: #777; }
+</style>
+</head>
+<body>
+<div class="main-container">
+    <h1>Interactive Regression Report Launcher</h1>
+    <div>
+        <label for="reportFile">Select your HTML report file:</label>
+        <input type="file" id="reportFile" accept=".html, .htm">
+    </div>
+
+    <div class="rerun-console" style="display: none;"> <!-- Initially hidden -->
+        <h2>Rerun Console</h2>
+        <div class="console-grid">
+            <div class="console-item">
+                <label><input type="checkbox" id="openCoverage"> Open Coverage</label>
+            </div>
+            <div class="console-item">
+                <label><input type="checkbox" id="rebuildCases"> Rebuild All Selected Cases</label>
+            </div>
+            <div class="console-item">
+                <label><input type="checkbox" id="includeWaveform"> Include Waveform in Rebuild</label>
+            </div>
+            <div class="console-item">
+                <label for="simTime">Simulation Time (hours):</label>
+                <input type="number" id="simTime" value="0" min="0">
+            </div>
+            <div class="console-item">
+                <label for="dirOption">Directory (-dir):</label>
+                <input type="text" id="dirOption" placeholder="e.g., my_rerun_dir">
+            </div>
+            <div class="console-item">
+                <label for="elabOpts">-elab_opts:</label>
+                <input type="text" id="elabOpts" placeholder="e.g., +define+ABC">
+            </div>
+            <div class="console-item">
+                <label for="vloganOpts">-vlogan_opts:</label>
+                <input type="text" id="vloganOpts" placeholder="e.g., +incdir+../src">
+            </div>
+            <div class="console-item">
+                <label for="runOpts">-run_opts:</label>
+                <input type="text" id="runOpts" placeholder="e.g., +UVM_TESTNAME=my_test">
+            </div>
+        </div>
+        <div class="button-bar">
+            <button onclick="selectAllNonPassed()">Select All Non-Passed Cases</button>
+            <button onclick="runRegression()">Run Selected Cases</button>
+        </div>
+    </div>
+
+    <div id="reportDisplayArea">
+        <p>Your selected report will be displayed here.</p>
+    </div>
+</div>
+
+<script>
+    document.getElementById('reportFile').addEventListener('change', function(event) {
+        const file = event.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const reportContent = e.target.result;
+                const displayArea = document.getElementById('reportDisplayArea');
+                
+                // Parse the HTML string to a DOM object
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(reportContent, 'text/html');
+                
+                // Find the main results table (assuming it's the first table with class 'results' or a specific ID)
+                // This selector needs to be robust for your report structure.
+                // Let's assume the table we care about is the one with id="detailedStatusTable"
+                // or the first table if no specific ID is known.
+                // From live_report.html, it's the table under "Detailed Run Job Statuses"
+                // It doesn't have an ID in the provided live_report.html, but it's the first complex table.
+                // Let's target a table that has a thead and then a tbody.
+                let detailedTable = doc.querySelector('tableที่มีthead > tbody'); // Simplified selector
+                
+                // A more specific selector based on the structure of live_report.html
+                // (the table after "Detailed Run Job Statuses" h2)
+                const h2DetailedStatus = Array.from(doc.querySelectorAll('h2')).find(h => h.innerText.includes("Detailed Run Job Statuses"));
+                if (h2DetailedStatus && h2DetailedStatus.nextElementSibling && h2DetailedStatus.nextElementSibling.tagName === 'TABLE') {
+                    detailedTable = h2DetailedStatus.nextElementSibling;
+                }
+
+
+                if (detailedTable) {
+                    // Add "Select for Rerun" column header
+                    const headerRow = detailedTable.querySelector('thead tr');
+                    if (headerRow) {
+                        const newHeader = document.createElement('th');
+                        newHeader.setAttribute('align', 'center');
+                        newHeader.innerText = 'Select for Rerun';
+                        headerRow.appendChild(newHeader);
+                    }
+
+                    // Add checkboxes to each data row
+                    const dataRows = detailedTable.querySelectorAll('tbody tr');
+                    dataRows.forEach(row => {
+                        // Avoid adding checkbox to summary rows if they exist and can be identified
+                        const firstCellText = row.cells[0] ? row.cells[0].innerText.trim().toLowerCase() : "";
+                        if (firstCellText.includes("total run jobs")) { // Example: skip summary row
+                            const emptyCell = document.createElement('td');
+                            row.appendChild(emptyCell);
+                            return;
+                        }
+
+                        const checkboxCell = document.createElement('td');
+                        checkboxCell.setAttribute('align', 'center');
+                        const checkbox = document.createElement('input');
+                        checkbox.type = 'checkbox';
+                        checkbox.className = 'rerun-checkbox';
+                        
+                        // Extract casename (this might need adjustment based on your report's Job Name column)
+                        // Assuming Job Name is in the first cell and might contain seed info
+                        let jobName = row.cells[0] ? row.cells[0].innerText.trim() : "unknown_case";
+                        let caseName = jobName.split(' (Seed:')[0].trim();
+                        checkbox.dataset.casename = caseName;
+                        // checkbox.dataset.seed = jobName.includes('(Seed:') ? jobName.split('(Seed:')[1].replace(')','').trim() : "";
+                        
+                        checkboxCell.appendChild(checkbox);
+                        row.appendChild(checkboxCell);
+                    });
+                    
+                    // Display the modified table (or the whole report body)
+                    // For simplicity, displaying the whole body of the loaded report.
+                    // You might want to extract only specific parts.
+                    displayArea.innerHTML = doc.body.innerHTML;
+                    document.querySelector('.rerun-console').style.display = 'block'; // Show console
+                } else {
+                    displayArea.innerHTML = '<p>Could not find the detailed status table in the uploaded report.</p>';
+                    document.querySelector('.rerun-console').style.display = 'none';
+                }
+            };
+            reader.readAsText(file);
+        }
+    });
+
+function selectAllNonPassed() {
+    console.log("selectAllNonPassed called");
+    // Ensure checkboxes are queried from the dynamically loaded content
+    const checkboxes = document.querySelectorAll('#reportDisplayArea .rerun-checkbox');
+    const rows = document.querySelectorAll('#reportDisplayArea table tbody tr'); // Adjust selector if table ID changes
+
+    checkboxes.forEach(checkbox => {
+        const row = checkbox.closest('tr');
+        if (row && row.cells.length > 1) { // Check if row and cells exist
+            const statusCell = row.cells[1]; // Assuming status is the second cell
+            if (statusCell) {
+                const status = statusCell.innerText.trim().toUpperCase();
+                if (status !== 'P') { // P=PASSED, F=Failed, K=Killed, D=Dispatched, Q=Queued
+                    checkbox.checked = true;
+                } else {
+                    checkbox.checked = false; 
+                }
+            }
+        }
+    });
+}
+
+function runRegression() {
+    console.log("runRegression called");
+    const selectedCasesToRerun = [];
+    // Query checkboxes from the dynamically loaded content
+    document.querySelectorAll('#reportDisplayArea .rerun-checkbox:checked').forEach(checkbox => {
+        selectedCasesToRerun.push(checkbox.dataset.casename);
+    });
+
+    let vcsContext = "unknown-vcs"; // Default
+    // Try to extract vcsContext from the loaded report's "Branch:" H3 tag
+    const branchHeader = Array.from(document.querySelectorAll('#reportDisplayArea h3')).find(h3 => h3.innerText.startsWith("Branch:"));
+    if (branchHeader) {
+        const branchPath = branchHeader.innerText.replace("Branch: ", "").trim();
+        const pathParts = branchPath.split('/');
+        const potentialVcsDir = pathParts[pathParts.length - 1];
+        if (potentialVcsDir.endsWith("-vcs")) {
+            vcsContext = potentialVcsDir;
+        } else {
+            console.warn("Could not reliably determine VCS context from Branch H3. Using default:", vcsContext);
+        }
+    } else {
+        console.warn("Branch H3 not found in loaded report. Using default VCS context:", vcsContext);
+    }
+    console.log("Using VCS Context:", vcsContext);
+
+    const rerunOptions = {
+        openCoverage: document.getElementById('openCoverage').checked,
+        rebuildCases: document.getElementById('rebuildCases').checked,
+        includeWaveform: document.getElementById('includeWaveform').checked,
+        simTimeHours: document.getElementById('simTime').value,
+        dirOption: document.getElementById('dirOption').value.trim(),
+        elabOpts: document.getElementById('elabOpts').value.trim(),
+        vloganOpts: document.getElementById('vloganOpts').value.trim(),
+        runOpts: document.getElementById('runOpts').value.trim(),
+        selectedCases: selectedCasesToRerun,
+        vcsContext: vcsContext
+    };
+
+    console.log("Rerun Options:", JSON.stringify(rerunOptions, null, 2));
+
+    if (rerunOptions.selectedCases.length === 0) {
+        alert("No cases selected for rerun.");
+        return;
+    }
+
+    fetch('http://localhost:5000/rerun', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(rerunOptions),
+    })
+    .then(response => response.json())
+    .then(data => {
+        console.log('Success from backend:', data);
+        alert(`Server response: ${data.message}`);
+    })
+    .catch((error) => {
+        console.error('Error sending data to backend:', error);
+        alert(`Error communicating with the rerun server. Is it running? Details: ${error}`);
+    });
+}
+</script>
+</body>
+</html>

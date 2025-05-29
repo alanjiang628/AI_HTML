@@ -26,6 +26,75 @@
     .status-K { color: orange; font-weight: bold; }
     .status-D { color: blue; font-weight: bold; }
     .status-Q { color: #777; }
+    #rerunStatusContainer { margin-top: 20px; padding: 10px; border: 1px solid #ddd; background-color: #f0f0f0; text-align: center; }
+    .status-running { color: #007bff; font-weight: bold; }
+    .status-completed { color: green; font-weight: bold; }
+    .status-failed { color: red; font-weight: bold; }
+    .status-queued { color: #ffc107; font-weight: bold; } /* Amber/Yellow for queued */
+    .status-preparing_hjson { color: #17a2b8; font-weight: bold; } /* Teal for preparing */
+    .status-hjson_prepared { color: #28a745; font-weight: bold; } /* Greenish for prepared */
+    
+    /* Spinner (can be used alongside progress circle or as fallback) */
+    .spinner {
+        border: 4px solid rgba(0, 0, 0, 0.1); 
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        border-left-color: #007bff;
+        animation: spin 1s ease infinite;
+        display: inline-block; /* Initially shown */
+        vertical-align: middle;
+        margin-right: 10px;
+    }
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+
+    /* Progress Circle Styles */
+    .progress-indicator-container {
+        display: flex; /* Will be 'flex' when active */
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 10px; /* Space below progress */
+    }
+    .circular-chart {
+        display: block;
+        margin: 0 auto; 
+        max-width: 60px; 
+        max-height: 60px; 
+    }
+    .circle-bg {
+        fill: none;
+        stroke: #eee;
+        stroke-width: 2.8; 
+    }
+    .circle {
+        fill: none;
+        stroke-width: 2.8; 
+        stroke-linecap: round;
+        animation: progress-animation 0.3s ease-out forwards; 
+        transform-origin: center; 
+        transform: rotate(-90deg); /* Start from top */
+    }
+    .percentage-text {
+        fill: #333; 
+        font-family: sans-serif;
+        font-size: 0.6em; 
+        text-anchor: middle;
+        dominant-baseline: middle; 
+    }
+    .progress-status-text {
+        margin-left: 15px;
+        font-size: 1.1em;
+        font-weight: bold;
+    }
+    /* Color classes for progress circle path */
+    .progress-circle-yellow .circle { stroke: #ffc107; } /* Amber/Yellow */
+    .progress-circle-red .circle { stroke: #dc3545; }    /* Red */
+    .progress-circle-green .circle { stroke: #28a745; }  /* Green */
+    .progress-circle-blue .circle { stroke: #007bff; } /* Blue for preparing/running/queued */
+
 </style>
 </head>
 <body>
@@ -70,8 +139,26 @@
     </div>
     <div class="button-bar">
         <button onclick="selectAllNonPassed()">Select All Non-Passed Cases</button>
-        <button onclick="runRegression()">Run Selected Cases</button>
+        <button id="runRegressionButton" onclick="runRegression()">Run Selected Cases</button>
     </div>
+</div>
+
+<div id="rerunStatusContainer" style="display: none;">
+    <h3>Rerun Job Status</h3>
+    <!-- New Progress Indicator Area -->
+    <div id="progressIndicator" class="progress-indicator-container" style="display: none;">
+        <div class="progress-circle" id="progressCircleHost"> <!-- Host for class-based coloring -->
+            <svg width="60" height="60" viewBox="0 0 36 36" class="circular-chart">
+                <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"></path>
+                <path id="progressCirclePath" class="circle" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"></path>
+                <text id="progressText" x="18" y="20.35" class="percentage-text">0%</text>
+            </svg>
+        </div>
+        <div id="progressStatusText" class="progress-status-text">Initializing...</div>
+    </div>
+    <!-- Fallback/Old Status Message (can be hidden or used for general messages if needed) -->
+    <p id="rerunStatusMessage" style="display: none;">Idle</p> 
+    <pre id="rerunJobDetails" style="text-align: left; background-color: #fff; padding: 10px; border: 1px solid #ccc; max-height: 200px; overflow-y: auto; display: none; margin-top:10px;"></pre>
 </div>
 
 <h2 align="center">Run Job Status Summary</h2>
@@ -171,41 +258,294 @@ function selectAllNonPassed() {
     });
 }
 
-function runRegression() {
-    console.log("runRegression called");
-    const selectedCasesToRerun = [];
-    document.querySelectorAll('#detailedStatusTable tbody .rerun-checkbox:checked').forEach(checkbox => {
-        // Extracting full job name from the first cell of the row
-        const row = checkbox.closest('tr');
-        const jobNameCell = row.cells[0];
-        if (jobNameCell) {
-            // Attempt to get a cleaner case name, removing seed if present in the display
-            let fullJobName = jobNameCell.innerText.trim();
-            let caseName = checkbox.dataset.casename || fullJobName.split(' (Seed:')[0].trim(); // Use data-casename if available
-            
-            selectedCasesToRerun.push(caseName); // Storing the base case name
-        }
-    });
+let currentJobId = null;
+let pollingInterval = null;
+let displayedOutputLinesCount = 0; 
+const runButton = document.getElementById('runRegressionButton');
+const statusContainer = document.getElementById('rerunStatusContainer');
+const statusMessageEl = document.getElementById('rerunStatusMessage'); // Old status message <p>
+const jobDetailsEl = document.getElementById('rerunJobDetails'); 
+const progressIndicatorEl = document.getElementById('progressIndicator');
+const progressCircleHostEl = document.getElementById('progressCircleHost'); // Element to apply color class to
+const progressCirclePathEl = document.getElementById('progressCirclePath');
+const progressTextEl = document.getElementById('progressText');
+const progressStatusTextEl = document.getElementById('progressStatusText');
 
-    // TODO: Determine vcsContext dynamically if possible, or have it set by the HTML generator
-    // Example: Extract from an element, or a global JS var set by the template
-    // For now, a placeholder. If your report is always for 'mtu-vcs' based on the H3:
-    let vcsContext = "mtu-vcs"; // Placeholder - THIS NEEDS TO BE SET CORRECTLY
-    const branchHeader = Array.from(document.querySelectorAll('h3')).find(h3 => h3.innerText.startsWith("Branch:"));
-    if (branchHeader) {
-        const branchPath = branchHeader.innerText.replace("Branch: ", "").trim();
-        const pathParts = branchPath.split('/');
-        const potentialVcsDir = pathParts[pathParts.length - 1];
-        if (potentialVcsDir.endsWith("-vcs")) {
-            vcsContext = potentialVcsDir;
-        } else {
-            console.warn("Could not reliably determine VCS context from Branch H3. Using placeholder:", vcsContext);
+
+function updateStatusDisplay(status, message, jobData) {
+    statusContainer.style.display = 'block';
+    jobDetailsEl.style.display = 'block'; 
+    progressIndicatorEl.style.display = 'flex'; // Show progress indicator
+    statusMessageEl.style.display = 'none'; // Hide old status message <p>
+
+    let currentOverallStatusText = message || status.replace(/_/g, ' ');
+    let progressCircleColorClass = 'progress-circle-blue'; // Default for running/preparing/queued
+    let percentage = 0;
+    let showSpinner = true; // Show spinner for intermediate states
+
+    // Handle progress_summary if available for more detailed text and circle color
+    if (jobData && jobData.progress_summary) {
+        const summary = jobData.progress_summary;
+        if (summary.total_selected > 0) {
+            percentage = Math.round((summary.processed_count / summary.total_selected) * 100);
+        } else { // No cases selected, but job might be running/completed
+            percentage = (status === 'completed' || status === 'failed') ? 100 : 0;
+        }
+        
+        currentOverallStatusText = `${status.replace(/_/g, ' ')}: ${summary.processed_count}/${summary.total_selected} cases processed`;
+        if (summary.failed_count > 0) {
+            currentOverallStatusText += ` (${summary.failed_count} failed)`;
+            progressCircleColorClass = 'progress-circle-red';
+        } else if (summary.passed_count > 0 && summary.failed_count === 0) {
+             // If some passed and no fails yet, could be yellow if still running, or green if all processed passed
+            if (summary.processed_count === summary.total_selected) {
+                 progressCircleColorClass = 'progress-circle-green';
+            } else {
+                 progressCircleColorClass = 'progress-circle-yellow'; // Still running, some passed, no fails
+            }
+        } else if (summary.processed_count < summary.total_selected && summary.failed_count === 0) {
+            progressCircleColorClass = 'progress-circle-blue'; // Still running, nothing decisive yet or just started
+        }
+    }
+
+    // Override for final states
+    switch(status) {
+        case 'completed':
+            currentOverallStatusText = `Completed: ${message || 'All selected cases processed.'}`;
+            progressCircleColorClass = 'progress-circle-green';
+            percentage = 100;
+            showSpinner = false;
+            break;
+        case 'failed':
+            currentOverallStatusText = `Failed: ${message || 'One or more operations failed.'}`;
+            progressCircleColorClass = 'progress-circle-red';
+            // Percentage might be based on progress_summary if available, or 100 if it's a general job failure
+            if (!jobData || !jobData.progress_summary || jobData.progress_summary.total_selected === 0) {
+                percentage = 100; // Indicate completion of the attempt, albeit failed
+            }
+            showSpinner = false;
+            break;
+        case 'queued':
+            currentOverallStatusText = "Queued...";
+            progressCircleColorClass = 'progress-circle-blue';
+            percentage = 0;
+            break;
+        case 'preparing_hjson':
+            currentOverallStatusText = "Preparing HJSON...";
+            progressCircleColorClass = 'progress-circle-blue';
+            percentage = 0; // Or a small fixed value like 5%
+            break;
+        case 'hjson_prepared':
+            currentOverallStatusText = "HJSON Prepared, Starting MSIM...";
+            progressCircleColorClass = 'progress-circle-blue';
+            percentage = 10; // Or a small fixed value
+            break;
+        case 'running_msim':
+             // Text and color already handled by progress_summary logic mostly
+            if (!jobData || !jobData.progress_summary) { // Fallback if no summary yet
+                currentOverallStatusText = "Running MSIM...";
+            }
+            break;
+        default: // Unknown status
+            currentOverallStatusText = status || 'Idle';
+            progressCircleColorClass = 'progress-circle-blue';
+            percentage = 0;
+            showSpinner = false;
+    }
+    
+    progressCircleHostEl.className = `progress-circle ${progressCircleColorClass}`;
+    progressCirclePathEl.setAttribute('stroke-dasharray', `${percentage}, 100`);
+    progressTextEl.textContent = `${percentage}%`;
+    progressStatusTextEl.textContent = currentOverallStatusText;
+    
+    // Show/hide spinner within the progressStatusTextEl if needed, or rely on circle animation
+    // For simplicity, the circle itself animates. Spinner can be removed or used as an overlay.
+    // The old spinner logic on statusMessageEl is now superseded.
+
+    // Streaming output display
+    if (jobData && jobData.output_lines && Array.isArray(jobData.output_lines)) {
+        const newLines = jobData.output_lines.slice(displayedOutputLinesCount);
+        if (newLines.length > 0) {
+            jobDetailsEl.textContent += newLines.join('\n') + '\n';
+            displayedOutputLinesCount = jobData.output_lines.length;
+            jobDetailsEl.scrollTop = jobDetailsEl.scrollHeight; 
+        }
+    }
+    
+    if (status === 'completed' || status === 'failed') {
+        if (jobData && jobData.stdout && displayedOutputLinesCount === 0) { 
+            jobDetailsEl.textContent = `Command: ${jobData.command || 'N/A'}\nReturn Code: ${jobData.returncode}\n\nOutput:\n${jobData.stdout}`;
+        }
+        if (status === 'failed' && jobData && jobData.message && !jobDetailsEl.textContent.includes(jobData.message)) {
+             jobDetailsEl.textContent += `\nFINAL STATUS: ${jobData.message}\n`;
+        }
+        jobDetailsEl.scrollTop = jobDetailsEl.scrollHeight; 
+
+        if (pollingInterval) clearInterval(pollingInterval);
+        pollingInterval = null;
+        currentJobId = null;
+        runButton.disabled = false;
+        runButton.innerText = "Run Selected Cases";
+
+        if (jobData && jobData.detailed_test_results && Array.isArray(jobData.detailed_test_results)) {
+            updateMainReportTable(jobData.detailed_test_results);
         }
     } else {
-        console.warn("Branch H3 not found. Using placeholder VCS context:", vcsContext);
+        runButton.disabled = true;
+        runButton.innerText = "Rerun in Progress...";
     }
-    console.log("Using VCS Context:", vcsContext);
+}
 
+function updateMainReportTable(detailedTestResults) {
+    console.log("Updating main report table with results:", detailedTestResults);
+    const tableBody = document.querySelector('#detailedStatusTable tbody');
+    if (!tableBody) {
+        console.error("Detailed status table body not found.");
+        return;
+    }
+    const jobNameParseRegexForRow = /^(.*?)\s*\(Seed:\s*(\d+)\)$/; 
+
+    detailedTestResults.forEach(result => {
+        const resultIdFromServer = result.id; 
+
+        const rows = tableBody.querySelectorAll('tr');
+        rows.forEach(row => {
+            const checkbox = row.querySelector('.rerun-checkbox');
+            const jobNameCell = row.cells[0]; 
+            const logPathCell = row.cells[3]; // Log path is the fourth cell
+
+            if (checkbox && jobNameCell) { 
+                const fullJobNameText = jobNameCell.innerText.trim();
+                const nameMatch = fullJobNameText.match(jobNameParseRegexForRow);
+
+                if (nameMatch && nameMatch[1] && nameMatch[2]) {
+                    const rowParsedBaseName = nameMatch[1].trim();
+                    const rowParsedSeed = nameMatch[2].trim();
+                    const rowGeneratedId = `${rowParsedBaseName}_seed${rowParsedSeed}`;
+
+                    if (rowGeneratedId === resultIdFromServer) {
+                        const statusCell = row.cells[1];
+                        const passRateCell = row.cells[2];
+                        const errorHintCell = row.cells[4];
+
+                        if (statusCell) {
+                            let statusText = 'U'; 
+                            let statusClass = 'status-U'; 
+                            switch (result.status.toUpperCase()) {
+                                case 'PASSED': statusText = 'P'; statusClass = 'status-P'; break;
+                                case 'FAILED': statusText = 'F'; statusClass = 'status-F'; break;
+                                case 'KILLED': statusText = 'K'; statusClass = 'status-K'; break;
+                                default: statusText = result.status.charAt(0).toUpperCase() || 'U';
+                            }
+                            statusCell.innerText = statusText;
+                            statusCell.className = `status-${statusText}`; // Ensure class matches text for styling
+                        }
+
+                        if (passRateCell) {
+                            passRateCell.innerText = (result.status.toUpperCase() === 'PASSED') ? '100%' : '0%';
+                        }
+                        if (errorHintCell) {
+                            errorHintCell.innerText = result.error_hint || '';
+                        }
+                        // Update Log Path
+                        if (logPathCell && result.new_log_path) {
+                            const codeTag = logPathCell.querySelector('code');
+                            if (codeTag) {
+                                codeTag.innerText = result.new_log_path;
+                                console.log(`Updated log path for ${resultIdFromServer} to ${result.new_log_path}`);
+                            } else { // Fallback if no <code> tag, just update cell (less ideal)
+                                logPathCell.innerText = result.new_log_path;
+                            }
+                        }
+                        console.log(`Updated row for ${resultIdFromServer} to status ${result.status}`);
+                    }
+                }
+            }
+        });
+    });
+}
+
+
+function pollJobStatus(jobId) {
+    fetch(`http://127.0.0.1:5000/rerun_status/${jobId}`) // Reverted to localhost for local debugging
+    .then(response => {
+        if (!response.ok) {
+            return response.json().catch(() => null).then(errData => {
+                const errorMsg = errData && errData.message ? errData.message : response.statusText;
+                throw new Error(`HTTP error ${response.status}: ${errorMsg}`);
+            });
+        }
+        return response.json();
+    })
+    .then(data => { 
+        console.log('Poll status response:', data);
+        updateStatusDisplay(data.status, data.message, data); 
+    })
+    .catch(error => {
+        console.error('Error polling job status:', error);
+        updateStatusDisplay('failed', `Error polling status: ${error.message}`, {}); // Pass empty jobData on error
+        if (pollingInterval) clearInterval(pollingInterval);
+        pollingInterval = null;
+        currentJobId = null;
+        runButton.disabled = false;
+        runButton.innerText = "Run Selected Cases";
+    });
+}
+
+function runRegression() {
+    if (currentJobId && progressIndicatorEl.style.display === 'flex' && 
+        !(progressStatusTextEl.textContent.toLowerCase().includes('completed') || progressStatusTextEl.textContent.toLowerCase().includes('failed'))) {
+        alert("A rerun job is already in progress and not yet completed/failed.");
+        return;
+    }
+    currentJobId = null; 
+    displayedOutputLinesCount = 0;
+    if(jobDetailsEl) jobDetailsEl.textContent = ''; 
+    progressIndicatorEl.style.display = 'none'; // Hide old progress if any
+
+    console.log("runRegression called");
+    const selectedCaseIdentifiersSet = new Set();
+    const jobNameParseRegex = /^(.*?)\s*\(Seed:\s*(\d+)\)$/; 
+
+    document.querySelectorAll('#detailedStatusTable tbody .rerun-checkbox:checked').forEach(checkbox => {
+        const row = checkbox.closest('tr');
+        if (!row) {
+            console.error("Could not find parent row for a selected checkbox:", checkbox); return;
+        }
+        const jobNameCell = row.cells[0]; 
+        if (jobNameCell) {
+            const fullJobNameText = jobNameCell.innerText.trim();
+            const nameMatch = fullJobNameText.match(jobNameParseRegex);
+            if (nameMatch && nameMatch[1] && nameMatch[2]) {
+                const parsedBaseName = nameMatch[1].trim(); 
+                const parsedSeed = nameMatch[2].trim();     
+                const uniqueCaseId = `${parsedBaseName}_seed${parsedSeed}`;
+                selectedCaseIdentifiersSet.add(uniqueCaseId);
+            } else {
+                console.error(`Could not parse job name text "${fullJobNameText}" from cell for checkbox:`, checkbox);
+            }
+        } else {
+            console.error("Could not find job name cell for a selected checkbox's row:", checkbox);
+        }
+    });
+    const selectedCasesToRerun = Array.from(selectedCaseIdentifiersSet);
+
+    let fullBranchPath = ""; 
+    const branchHeader = Array.from(document.querySelectorAll('h3')).find(h3 => h3.innerText.startsWith("Branch:"));
+    if (branchHeader) {
+        fullBranchPath = branchHeader.innerText.replace("Branch: ", "").trim();
+    } else {
+        console.warn("Branch H3 tag not found. branchPath will be empty.");
+    }
+
+    let vcsContext = "default-vcs"; 
+    if (fullBranchPath) {
+        const pathParts = fullBranchPath.split('/');
+        const potentialVcsDir = pathParts[pathParts.length - 1];
+        if (potentialVcsDir && potentialVcsDir.includes("-vcs")) { 
+            vcsContext = potentialVcsDir;
+        }
+    }
 
     const rerunOptions = {
         openCoverage: document.getElementById('openCoverage').checked,
@@ -216,37 +556,58 @@ function runRegression() {
         elabOpts: document.getElementById('elabOpts').value.trim(),
         vloganOpts: document.getElementById('vloganOpts').value.trim(),
         runOpts: document.getElementById('runOpts').value.trim(),
-        selectedCases: selectedCasesToRerun, // This is just a list of names
-        vcsContext: vcsContext // Adding the determined VCS context
+        selectedCases: selectedCasesToRerun,
+        branchPath: fullBranchPath, 
+        vcsContext: vcsContext 
     };
-
-    console.log("Rerun Options (including vcsContext):", JSON.stringify(rerunOptions, null, 2));
 
     if (rerunOptions.selectedCases.length === 0) {
         alert("No cases selected for rerun.");
         return;
     }
+    if (!rerunOptions.branchPath) {
+        alert("Error: Branch information could not be found. Server needs this to locate HJSON files.");
+        updateStatusDisplay('failed', 'Failed to start: Branch information missing.', {});
+        return;
+    }
 
-    // For now, we'll just display the collected data.
-    // In a real implementation, this data would be sent to a backend (e.g., Python script)
-    // or used to generate a command for the user to run.
-    // Send data to the Flask backend
-    fetch('http://localhost:5000/rerun', {
+    updateStatusDisplay('queued', 'Initiating rerun request...', {}); // Initial display
+    runButton.disabled = true;
+    runButton.innerText = "Rerun in Progress...";
+
+    fetch('http://127.0.0.1:5000/rerun', { // Reverted to localhost for local debugging
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json', },
         body: JSON.stringify(rerunOptions),
     })
-    .then(response => response.json())
+    .then(response => {
+        if (!response.ok) { 
+             return response.json().then(errData => { 
+                throw new Error(`Server error ${response.status}: ${errData.message || 'Unknown error'}`);
+            }).catch(() => { 
+                throw new Error(`Server error ${response.status}: ${response.statusText}`);
+            });
+        }
+        return response.json();
+    })
     .then(data => {
-        console.log('Success from backend:', data);
-        alert(`Server response: ${data.message}`);
-        // Optionally, update the page or provide more feedback based on 'data'
+        console.log('Initial response from backend:', data);
+        if (data.job_id) {
+            currentJobId = data.job_id;
+            // Initial status display before first poll
+            updateStatusDisplay('queued', `Rerun initiated. Job ID: ${currentJobId}. Polling...`, { progress_summary: { total_selected: selectedCasesToRerun.length, processed_count: 0, passed_count: 0, failed_count: 0 } });
+            pollingInterval = setInterval(() => pollJobStatus(currentJobId), 2000); // Poll every 2 seconds
+        } else {
+            updateStatusDisplay('failed', `Failed to initiate rerun: ${data.message || 'No Job ID received'}`, {});
+            runButton.disabled = false;
+            runButton.innerText = "Run Selected Cases";
+        }
     })
     .catch((error) => {
         console.error('Error sending data to backend:', error);
-        alert(`Error communicating with the rerun server. Is it running? Details: ${error}`);
+        updateStatusDisplay('failed', `Error communicating with server: ${error.message}`, {});
+        runButton.disabled = false; 
+        runButton.innerText = "Run Selected Cases";
     });
 }
 </script>

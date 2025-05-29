@@ -9,12 +9,11 @@ import uuid
 import time
 import copy
 import re
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
-
-app = Flask(__name__)
-CORS(app)
-
+from models import Repo
+from extensions import db
+from flask import Flask, render_template, request, jsonify, send_from_directory, Blueprint
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+bp = Blueprint('live_reporter', __name__, template_folder=os.path.join(base_dir, 'templates'))
 script_dir = os.path.dirname(os.path.abspath(__file__))
 JOB_STATUS = {} # Stores status, message, command, returncode, stdout, stderr, output_lines
 
@@ -22,7 +21,7 @@ JOB_STATUS = {} # Stores status, message, command, returncode, stdout, stderr, o
 def update_job_status(job_id, status, message=None, command=None, returncode=None, stdout=None, stderr=None):
     if job_id not in JOB_STATUS: # Ensure job_id entry exists
         JOB_STATUS[job_id] = {"output_lines": [], "status": "initializing", "message": "Job initializing."}
-    
+
     JOB_STATUS[job_id]['status'] = status
     if message is not None: JOB_STATUS[job_id]['message'] = message
     if command is not None: JOB_STATUS[job_id]['command'] = command
@@ -46,7 +45,7 @@ def add_output_line_to_job(job_id, line):
         if match:
             status_from_log = match.group(2).upper()
             summary = JOB_STATUS[job_id]['progress_summary']
-            
+
             # This simple increment assumes each TEST_DONE is unique for a test during live parse.
             # More sophisticated logic might be needed if tests can have multiple TEST_DONE lines or if parsing needs to be idempotent.
             # We only increment if we haven't processed all selected tests yet.
@@ -65,25 +64,6 @@ def add_output_line_to_job(job_id, line):
 def get_job_status(job_id):
     return JOB_STATUS.get(job_id, {"status": "not_found", "message": "Job ID not found.", "output_lines": []})
 # --- End Utility functions ---
-
-def _parse_individual_parse_run_log(parse_run_log_path):
-    """Helper to parse a single parse_run.log file based on its first line."""
-    try:
-        with open(parse_run_log_path, 'r', encoding='utf-8', errors='replace') as f:
-            first_line = f.readline().strip().lower()
-            if 'run.log passed' in first_line:
-                return 'PASSED'
-            elif 'run.log failed' in first_line or 'run.log is unknown' in first_line:
-                return 'FAILED'
-            else:
-                # If parse_run.log exists but content is unexpected for pass/fail
-                return 'UNKNOWN' 
-    except FileNotFoundError:
-        return None # Indicates parse_run.log was not found
-    except Exception as e:
-        # Log an error if parsing fails for an existing file
-        print(f"Error parsing log file {parse_run_log_path}: {e}")
-        return 'UNKNOWN' # Indicates error during parsing
 
 def find_primary_log_for_rerun(base_search_path):
     """
@@ -105,7 +85,7 @@ def find_primary_log_for_rerun(base_search_path):
             if os.path.exists(potential_log_path):
                 print(f"Found log '{log_filename}' in common location: {os.path.abspath(potential_log_path)}")
                 return os.path.abspath(potential_log_path)
-        
+
         # If not in common locations, perform a wider search (os.walk)
         print(f"Log '{log_filename}' not in common locations. Starting deeper search in {base_search_path}...")
         for root, _, files in os.walk(base_search_path):
@@ -114,109 +94,43 @@ def find_primary_log_for_rerun(base_search_path):
                 print(f"Found log '{log_filename}' via os.walk: {found_path}")
                 return found_path
         print(f"Log '{log_filename}' not found via os.walk in {base_search_path}.")
-        
+
     print(f"No run.log or comp.log found in {base_search_path} after checking common locations and deep search.")
     return None
 
-def parse_msim_output_for_test_statuses(msim_stdout, selected_cases_with_seed, rerun_actual_output_dir_abs_path, vcs_context_name, job_id_for_logging=None):
+def parse_msim_output_for_test_statuses(msim_stdout, selected_cases_with_seed, new_batch_log_path_for_all_tests):
     """
-    Parses MSIM stdout and individual test logs to extract final status for each test.
-    rerun_actual_output_dir_abs_path: Absolute path to the directory where msim -dir wrote outputs (e.g., /path/to/PRJ_ICDIR/rerun_xyz)
-                                      If None or invalid, parsing individual logs will be skipped.
-    vcs_context_name: The name of the vcs context (e.g., "mtu-vcs"). Used for constructing relative log paths for HTML.
-    Returns a list of dictionaries: [{'id': 'test_case_name_seedXXXX', 'status': 'PASSED'/'FAILED'/'UNKNOWN', 
-                                     'error_hint': '...', 'new_log_path': 'relative/path/to/new/run.log'}]
+    Parses MSIM stdout to extract final status for each test.
+    Returns a list of dictionaries: [{'id': 'test_case_name_seedXXXX', 'status': 'PASSED'/'FAILED'/'UNKNOWN',
+                                     'error_hint': '...', 'new_log_path': 'path/to/new/log.log'}]
     """
-    results_map = {}
-    rerun_dir_basename = os.path.basename(rerun_actual_output_dir_abs_path) if rerun_actual_output_dir_abs_path and os.path.isdir(rerun_actual_output_dir_abs_path) else "unknown_rerun_dir"
-
-    if job_id_for_logging:
-        add_output_line_to_job(job_id_for_logging, f"Starting detailed status parsing. Rerun output dir: {rerun_actual_output_dir_abs_path}, VCS context: {vcs_context_name}")
-
-    for case_id in selected_cases_with_seed:
-        # base_test_name = case_id.split("_seed")[0] # Not needed for path construction if using case_id directly
-        
-        # Default values
-        current_status = "UNKNOWN"
-        error_hint = "Status not determined."
-        # Construct default HTML log path, pointing to where the run.log should be
-        # This path is relative to the vcs_context directory, then the rerun_dir, then sim structure.
-        # Uses case_id (full name with seed) for the test directory
-        html_log_path = f"{rerun_dir_basename}/sim/{case_id}/latest/run.log" # Simplified relative path from vcs_context
-
-        if rerun_actual_output_dir_abs_path and os.path.isdir(rerun_actual_output_dir_abs_path):
-            # Use case_id (full name with seed) for the individual test simulation directory
-            individual_test_sim_dir = os.path.join(rerun_actual_output_dir_abs_path, 'sim', case_id)
-            # Look for 'latest' symlink or the newest timestamped directory
-            latest_log_dir = os.path.join(individual_test_sim_dir, 'latest')
-            if not os.path.isdir(latest_log_dir): # Fallback to finding newest timestamp dir if 'latest' doesn't exist
-                if os.path.isdir(individual_test_sim_dir):
-                    subdirs = [os.path.join(individual_test_sim_dir, d) for d in os.listdir(individual_test_sim_dir) if os.path.isdir(os.path.join(individual_test_sim_dir, d))]
-                    if subdirs:
-                        latest_log_dir = max(subdirs, key=os.path.getmtime)
-                    else: # No timestamped directory found
-                        latest_log_dir = None # Ensure it's None if no valid dir found
-                else: # individual_test_sim_dir itself doesn't exist
-                    latest_log_dir = None
-
-            if latest_log_dir and os.path.isdir(latest_log_dir):
-                parse_run_log_path = os.path.join(latest_log_dir, 'parse_run.log')
-                actual_run_log_path = os.path.join(latest_log_dir, 'run.log')
-                
-                # Update html_log_path to be more specific if 'latest' or timestamp was resolved
-                # The client JS expects paths like: <vcs_context>/<rerun_dir_name_if_any>/sim/<test_name>/<timestamp_or_latest>/run.log
-                # The `rerun_dir_basename` is the `-dir` option. `vcs_context_name` is the top-level VCS dir.
-                # The path should be relative from the root of where `vcs_context_name` directories reside.
-                # If `branch_path` was `/abs/path/to/project_root/dv/ip_name-vcs`, then `vcs_context_name` is `ip_name-vcs`.
-                # The log path in HTML is relative to `project_root/dv/`.
-                # So, `ip_name-vcs/rerun_dir_basename/sim/case_id/latest/run.log`
-                timestamp_or_latest_name = os.path.basename(latest_log_dir)
-                html_log_path = f"{vcs_context_name}/{rerun_dir_basename}/sim/{case_id}/{timestamp_or_latest_name}/run.log"
-                if job_id_for_logging:
-                    add_output_line_to_job(job_id_for_logging, f"For {case_id}: Checking parse_run.log at {parse_run_log_path}")
-
-                status_from_parse_log = _parse_individual_parse_run_log(parse_run_log_path)
-                if status_from_parse_log: # Not None
-                    current_status = status_from_parse_log
-                    if current_status == "FAILED":
-                        error_hint = "Failed (from parse_run.log)"
-                    elif current_status == "PASSED":
-                        error_hint = "" # Clear hint
-                    else: # UNKNOWN from parse_run.log
-                        error_hint = "Status unclear from parse_run.log"
-                    if job_id_for_logging:
-                         add_output_line_to_job(job_id_for_logging, f"For {case_id}: Status from parse_run.log: {current_status}")
-            elif job_id_for_logging:
-                 add_output_line_to_job(job_id_for_logging, f"For {case_id}: Individual log directory not found or 'latest' not resolved: {latest_log_dir if latest_log_dir else individual_test_sim_dir}")
-
-        # Fallback or supplement with MSIM stdout [TEST_DONE] if status is still UNKNOWN
-        if current_status == "UNKNOWN":
-            if job_id_for_logging:
-                add_output_line_to_job(job_id_for_logging, f"For {case_id}: parse_run.log status is UNKNOWN or file not found. Checking msim_stdout.")
-            # Regex for specific test_id (case_id format is test_base_name_seedSEED)
-            # The [TEST_DONE] log uses the full name including _seedSEED
-            uvm_test_done_pattern_specific = re.compile(r"\[TEST_DONE\]\s*Test\s*" + re.escape(case_id) + r"\s*\((\w+)\)")
-            for line in msim_stdout.splitlines():
-                match = uvm_test_done_pattern_specific.search(line)
-                if match:
-                    status_from_stdout = match.group(1).upper()
-                    current_status = status_from_stdout # Override if found
-                    if status_from_stdout == "FAILED":
-                        error_hint = "Failed (from [TEST_DONE] in msim stdout)"
-                    elif status_from_stdout == "PASSED":
-                        error_hint = "" # Clear hint
-                    if job_id_for_logging:
-                        add_output_line_to_job(job_id_for_logging, f"For {case_id}: Status from msim_stdout [TEST_DONE]: {current_status}")
-                    break 
-        
-        results_map[case_id] = {
+    # Initialize results for all selected cases
+    results_map = {
+        case_id: {
             "id": case_id,
-            "status": current_status,
-            "error_hint": error_hint,
-            "new_log_path": html_log_path 
-        }
-        if job_id_for_logging:
-            add_output_line_to_job(job_id_for_logging, f"For {case_id}: Final determined status: {current_status}, Log: {html_log_path}")
+            "status": "UNKNOWN",
+            "error_hint": "Status not determined from MSIM output.",
+            "new_log_path": new_batch_log_path_for_all_tests # Assign the common log path
+        } for case_id in selected_cases_with_seed
+    }
+
+    uvm_test_done_pattern = re.compile(r"\[TEST_DONE\]\s*Test\s*([\w_.-]+seed\d+)\s*\((\w+)\)")
+
+    for line in msim_stdout.splitlines():
+        match = uvm_test_done_pattern.search(line)
+        if match:
+            test_id_from_log = match.group(1)
+            status_from_log = match.group(2).upper() # PASSED, FAILED
+
+            if test_id_from_log in results_map:
+                results_map[test_id_from_log]["status"] = status_from_log
+                if status_from_log == "FAILED":
+                     results_map[test_id_from_log]["error_hint"] = "Test reported FAILED (TEST_DONE)"
+                elif status_from_log == "PASSED":
+                    results_map[test_id_from_log]["error_hint"] = "" # Clear hint if passed
+            else:
+                # This case should not happen if selected_cases_with_seed contains all tests run
+                print(f"Warning: Test '{test_id_from_log}' found in log but not in selected cases list.")
 
     return list(results_map.values())
 
@@ -224,7 +138,7 @@ def parse_msim_output_for_test_statuses(msim_stdout, selected_cases_with_seed, r
 def prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name):
     print(f"--- prepare_rerun_hjson_files called for IP: {ip_name} ---")
 
-    job_id_for_logging = options.get("job_id_for_logging") 
+    job_id_for_logging = options.get("job_id_for_logging")
 
     proj_root_dir = os.environ.get('PRJ_ICDIR')
     if not proj_root_dir:
@@ -233,25 +147,25 @@ def prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name):
         if job_id_for_logging:
             add_output_line_to_job(job_id_for_logging, "Error: PRJ_ICDIR environment variable not set. Configure server environment.")
         return None
-    
+
     print(f"Using PRJ_ICDIR from environment: {proj_root_dir}")
 
     original_hjson_filename = f"{ip_name}.hjson"
     original_hjson_path = os.path.join(
-        proj_root_dir, 
-        "dv", 
-        "sim_ctrl", 
-        "ts", 
+        proj_root_dir,
+        "dv",
+        "sim_ctrl",
+        "ts",
         original_hjson_filename
     )
     print(f"Calculated original HJSON path: {original_hjson_path}")
-    
+
     target_hjson_dir = os.path.join(proj_root_dir, "dv", "sim_ctrl", "ts", "temp")
-    
+
     print(f"Target directory for 'rerun.hjson' under PRJ_ICDIR: {target_hjson_dir}")
 
     try:
-        os.makedirs(target_hjson_dir, exist_ok=True) 
+        os.makedirs(target_hjson_dir, exist_ok=True)
         print(f"Ensured target directory for 'rerun.hjson' exists: {target_hjson_dir}")
     except Exception as e:
         error_msg = f"CRITICAL ERROR: Failed to create target directory {target_hjson_dir} for 'rerun.hjson': {e}"
@@ -269,7 +183,7 @@ def prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name):
         if job_id_for_logging:
             add_output_line_to_job(job_id_for_logging, f"Error: Source HJSON not found: {original_hjson_path}")
         return None
-    
+
     print(f"Source HJSON file found at {original_hjson_path}")
 
     try:
@@ -284,7 +198,7 @@ def prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name):
 
     try:
         with open(temp_target_hjson_path, 'r') as file:
-            target_hjson_data = hjson.load(file) 
+            target_hjson_data = hjson.load(file)
         print(f"Successfully loaded HJSON data from {temp_target_hjson_path}")
     except Exception as e:
         error_msg = f"Error: Could not read or parse HJSON from {temp_target_hjson_path}: {e}"
@@ -293,9 +207,9 @@ def prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name):
             add_output_line_to_job(job_id_for_logging, f"Error: Failed to parse HJSON {temp_target_hjson_path}: {e}")
         return None
 
-    final_tests_section_for_output = [] 
+    final_tests_section_for_output = []
     test_names_for_regression_list = []
-    original_tests_from_hjson = target_hjson_data.get("tests", []) 
+    original_tests_from_hjson = target_hjson_data.get("tests", [])
     original_test_defs_map_by_base_name = {}
 
     if isinstance(original_tests_from_hjson, list):
@@ -316,8 +230,8 @@ def prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name):
         print(f"Warning: Original 'tests' section in {temp_target_hjson_path} is neither list nor dict (type: {type(original_tests_from_hjson)}). Cannot find base test definitions for templates.")
 
     selected_cases_for_this_ip = [
-        case_id for case_id in options.get('selectedCases', []) 
-        if case_id.startswith(ip_name + "_") 
+        case_id for case_id in options.get('selectedCases', [])
+        if case_id.startswith(ip_name + "_")
     ]
 
     if not selected_cases_for_this_ip:
@@ -330,7 +244,7 @@ def prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name):
                 continue
             base_test_name = parts[0]
             seed_str = parts[1]
-            
+
             try:
                 seed_val = int(seed_str)
             except ValueError:
@@ -338,34 +252,34 @@ def prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name):
                 continue
 
             original_def_template = original_test_defs_map_by_base_name.get(base_test_name)
-            
+
             new_test_def_object = {}
             if original_def_template:
                 print(f"Info: Found original definition template for base test '{base_test_name}'.")
                 new_test_def_object = copy.deepcopy(original_def_template)
             else:
                 print(f"Warning: Original definition template for base test '{base_test_name}' not found. Creating a minimal definition for rerun.")
-                new_test_def_object["uvm_test_seq"] = f"unknown_vseq_for_{base_test_name}" 
+                new_test_def_object["uvm_test_seq"] = f"unknown_vseq_for_{base_test_name}"
                 new_test_def_object["build_mode"] = f"unknown_build_mode_for_{base_test_name}"
 
-            new_test_def_object['name'] = case_id_with_seed 
-            
+            new_test_def_object['name'] = case_id_with_seed
+
             if 'seed' in new_test_def_object:
-                del new_test_def_object['seed'] 
+                del new_test_def_object['seed']
 
             current_run_opts = new_test_def_object.get("run_opts", [])
             if not isinstance(current_run_opts, list):
                 print(f"Warning: 'run_opts' for base test '{base_test_name}' was not a list (type: {type(current_run_opts)}). Re-initializing for seed.")
                 current_run_opts = []
-            
+
             updated_run_opts = [opt for opt in current_run_opts if not str(opt).startswith("+ntb_random_seed=")]
             updated_run_opts.append(f"+ntb_random_seed={seed_val}")
             new_test_def_object['run_opts'] = updated_run_opts
-            
+
             print(f"Info: Updated 'run_opts' for test '{case_id_with_seed}' to include '+ntb_random_seed={seed_val}'.")
 
             final_tests_section_for_output.append(new_test_def_object)
-            test_names_for_regression_list.append(case_id_with_seed) 
+            test_names_for_regression_list.append(case_id_with_seed)
             print(f"Info: Prepared test definition for '{case_id_with_seed}' (with run_opts for seed) to be included in rerun.hjson 'tests' list.")
 
     target_hjson_data['tests'] = final_tests_section_for_output
@@ -373,9 +287,9 @@ def prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name):
 
     rerun_regression_group = {
         "name": "rerun",
-        "tests": test_names_for_regression_list 
+        "tests": test_names_for_regression_list
     }
-    
+
     if not isinstance(target_hjson_data.get("regressions"), list):
         print(f"Warning: 'regressions' section in loaded HJSON is not a list (or does not exist). Initializing as a new list with the 'rerun' group.")
         target_hjson_data["regressions"] = [rerun_regression_group]
@@ -387,12 +301,12 @@ def prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name):
         else:
             print("Info: Adding new 'rerun' regression group to HJSON.")
             target_hjson_data["regressions"].append(rerun_regression_group)
-    
+
     print(f"Info: Final 'rerun' regression group's 'tests' list: {test_names_for_regression_list}")
 
     try:
         with open(temp_target_hjson_path, 'w') as file:
-            hjson.dump(target_hjson_data, file, indent=2) 
+            hjson.dump(target_hjson_data, file, indent=2)
         print(f"Successfully wrote modified HJSON to {temp_target_hjson_path}")
         return temp_target_hjson_path
     except Exception as e:
@@ -403,11 +317,11 @@ def prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name):
         return None
 
 def long_running_rerun_task(job_id, options):
-    app.logger.info(f"--- Starting long_running_rerun_task for job_id: {job_id} ---")
-    app.logger.info(f"Options received by task: {options}")
+    print(f"--- Starting long_running_rerun_task for job_id: {job_id} ---")
+    print(f"Options received by task: {options}")
     try:
-        options["job_id_for_logging"] = job_id 
-        
+        options["job_id_for_logging"] = job_id
+
         num_selected_cases = len(options.get('selectedCases', []))
         JOB_STATUS[job_id]['progress_summary'] = {
             "total_selected": num_selected_cases,
@@ -419,7 +333,7 @@ def long_running_rerun_task(job_id, options):
         add_output_line_to_job(job_id, "Rerun task started. Preparing HJSON files...")
 
         temp_rerun_dir_name = f"temp_rerun_{job_id}_{str(uuid.uuid4())[:8]}"
-        temp_rerun_dir = os.path.join(script_dir, temp_rerun_dir_name) 
+        temp_rerun_dir = os.path.join(script_dir, temp_rerun_dir_name)
 
         try:
             os.makedirs(temp_rerun_dir, exist_ok=True)
@@ -436,12 +350,12 @@ def long_running_rerun_task(job_id, options):
             return
 
         add_output_line_to_job(job_id, f"Received branch path for IP context: {branch_path}")
-        
+
         derived_ip_name = None
         try:
             ip_folder_name = os.path.basename(branch_path)
             derived_ip_name = ip_folder_name.split('-', 1)[0]
-            if not derived_ip_name: 
+            if not derived_ip_name:
                 raise ValueError("Derived IP name is empty.")
         except Exception as e:
             update_job_status(job_id, "failed", f"Failed to derive IP name from branch path: {branch_path}. Error: {e}")
@@ -450,15 +364,15 @@ def long_running_rerun_task(job_id, options):
 
         add_output_line_to_job(job_id, f"Derived IP name for HJSON context: {derived_ip_name}")
 
-        ip_names_to_process = {derived_ip_name} 
+        ip_names_to_process = {derived_ip_name}
 
-        generated_hjson_paths_map = {} 
+        generated_hjson_paths_map = {}
         all_hjson_prepared_successfully = True
 
-        for ip_name in ip_names_to_process: 
+        for ip_name in ip_names_to_process:
             add_output_line_to_job(job_id, f"Processing IP: {ip_name} for HJSON preparation.")
-            hjson_path = prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name) 
-            
+            hjson_path = prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name)
+
             if hjson_path:
                 generated_hjson_paths_map[ip_name] = hjson_path
                 add_output_line_to_job(job_id, f"Successfully prepared HJSON for {ip_name} at {hjson_path}")
@@ -466,7 +380,7 @@ def long_running_rerun_task(job_id, options):
                 add_output_line_to_job(job_id, f"Error: Failed to prepare HJSON for IP: {ip_name}. See server console / job log for details.")
                 update_job_status(job_id, "failed", f"Failed to prepare HJSON for {ip_name}.")
                 all_hjson_prepared_successfully = False
-                break 
+                break
 
         if not all_hjson_prepared_successfully:
             add_output_line_to_job(job_id, "HJSON preparation failed for one or more IPs. Aborting msim launch.")
@@ -479,8 +393,8 @@ def long_running_rerun_task(job_id, options):
 
         update_job_status(job_id, "hjson_prepared", "HJSON files prepared. Starting MSIM...")
         add_output_line_to_job(job_id, "All HJSON files prepared successfully.")
-        
-        if not generated_hjson_paths_map: 
+
+        if not generated_hjson_paths_map:
             add_output_line_to_job(job_id, "Error: HJSON preparation step did not yield a file path. Cannot construct msim command.")
             update_job_status(job_id, "failed", "MSIM command construction failed: HJSON preparation error.")
             return
@@ -489,10 +403,10 @@ def long_running_rerun_task(job_id, options):
         add_output_line_to_job(job_id, f"MSIM will be invoked with 'rerun' as config argument.")
         add_output_line_to_job(job_id, f"This expects msim to use the HJSON file prepared at: {prepared_hjson_actual_path}")
 
-        msim_command_parts = ["msim", "rerun", "-t", "rerun"] 
+        msim_command_parts = ["msim", "rerun", "-t", "rerun"]
         add_output_line_to_job(job_id, f"Base msim command: msim rerun -t rerun")
-        
-        if not options.get('rebuildCases', False): 
+
+        if not options.get('rebuildCases', False):
             msim_command_parts.append("-so")
             add_output_line_to_job(job_id, "Adding -so (not rebuilding all selected cases / skip optimize)")
         else:
@@ -502,11 +416,11 @@ def long_running_rerun_task(job_id, options):
             msim_command_parts.append("-w")
             add_output_line_to_job(job_id, "Adding -w (include waveform)")
 
-        if options.get('openCoverage'): 
+        if options.get('openCoverage'):
             msim_command_parts.append("-c")
             add_output_line_to_job(job_id, "Adding -c (open coverage)")
 
-        sim_time_hours_str = options.get('simTimeHours', "0") 
+        sim_time_hours_str = options.get('simTimeHours', "0")
         try:
             sim_time_hours = int(sim_time_hours_str)
             if sim_time_hours > 0:
@@ -516,59 +430,59 @@ def long_running_rerun_task(job_id, options):
         except ValueError:
             add_output_line_to_job(job_id, f"Warning: Invalid value for simTimeHours: {sim_time_hours_str}. Not adding -rto.")
 
-        dir_option_value = options.get('dirOption', '').strip() 
+        dir_option_value = options.get('dirOption', '').strip()
         if dir_option_value:
             msim_command_parts.extend(["-dir", dir_option_value])
             add_output_line_to_job(job_id, f"Adding -dir {dir_option_value}")
-        
-        elab_opts_value = options.get('elabOpts', '').strip() 
+
+        elab_opts_value = options.get('elabOpts', '').strip()
         if elab_opts_value:
             msim_command_parts.extend(["-elab", elab_opts_value])
             add_output_line_to_job(job_id, f"Adding -elab \"{elab_opts_value}\"")
 
-        vlogan_opts_value = options.get('vloganOpts', '').strip() 
+        vlogan_opts_value = options.get('vloganOpts', '').strip()
         if vlogan_opts_value:
             msim_command_parts.extend(["-vlog", vlogan_opts_value])
             add_output_line_to_job(job_id, f"Adding -vlog \"{vlogan_opts_value}\"")
 
-        run_opts_value = options.get('runOpts', '').strip() 
+        run_opts_value = options.get('runOpts', '').strip()
         if run_opts_value:
             msim_command_parts.extend(["-ro", run_opts_value])
             add_output_line_to_job(job_id, f"Adding -ro \"{run_opts_value}\"")
 
-        msim_full_command = " ".join(msim_command_parts) 
+        msim_full_command = " ".join(msim_command_parts)
         add_output_line_to_job(job_id, f"Constructed msim command: {msim_full_command}")
         update_job_status(job_id, "running_msim", "Executing MSIM command...", command=msim_full_command)
         add_output_line_to_job(job_id, "Executing MSIM. This may take some time...")
-        
+
         try:
             process = subprocess.Popen(msim_command_parts, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, universal_newlines=True)
-            
+
             if process.stdout:
                 for line in iter(process.stdout.readline, ''):
-                    print(line, end='') 
+                    print(line, end='')
                     add_output_line_to_job(job_id, line.strip())
                 process.stdout.close()
 
             return_code = process.wait()
-            
+
             stderr_output = ""
             if process.stderr:
                 stderr_output = process.stderr.read()
                 process.stderr.close()
                 if stderr_output:
                     add_output_line_to_job(job_id, "MSIM Stderr:")
-                    for line_err in stderr_output.splitlines(): 
+                    for line_err in stderr_output.splitlines():
                         add_output_line_to_job(job_id, line_err.strip())
-            
+
             final_status_key = "completed" if return_code == 0 else "failed"
             final_status_message = "MSIM run completed successfully." if return_code == 0 else f"MSIM run failed with return code {return_code}."
-            
+
             update_job_status(job_id, final_status_key, final_status_message, returncode=return_code, stderr=stderr_output if return_code != 0 else None)
             add_output_line_to_job(job_id, final_status_message)
 
-            full_msim_stdout = "\n".join(JOB_STATUS[job_id].get("output_lines", [])) 
-            
+            full_msim_stdout = "\n".join(JOB_STATUS[job_id].get("output_lines", []))
+
             rerun_base_dir_for_logs = None
             dir_option_value = options.get('dirOption', '').strip()
             if dir_option_value:
@@ -578,45 +492,23 @@ def long_running_rerun_task(job_id, options):
                     rerun_base_dir_for_logs = os.path.abspath(os.path.join(os.getcwd(), dir_option_value))
                 add_output_line_to_job(job_id, f"MSIM -dir option was: '{dir_option_value}'. Absolute search path for logs: {rerun_base_dir_for_logs}")
             else:
-                rerun_base_dir_for_logs = os.getcwd() 
+                rerun_base_dir_for_logs = os.getcwd()
                 add_output_line_to_job(job_id, f"MSIM -dir option not specified. Searching for logs within server CWD: {rerun_base_dir_for_logs}")
 
-            # Determine the actual absolute path where msim outputs were written
-            proj_root_dir = os.environ.get('PRJ_ICDIR')
-            actual_rerun_output_dir_abs = None
-            
-            # dir_option_value is the string passed to `msim -dir`
-            # It's relative to msim's CWD, which is PRJ_ICDIR for our `msim rerun` command.
-            dir_option_value_from_client = options.get('dirOption', '').strip()
-
-            if not proj_root_dir:
-                add_output_line_to_job(job_id, "CRITICAL Error: PRJ_ICDIR not set. Cannot determine absolute path for rerun logs.")
-                # Fallback: try to use a non-specific path for results, which will likely lead to UNKNOWN statuses
-                detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout, options.get('selectedCases', []), None, "unknown-vcs", job_id)
-            elif dir_option_value_from_client:
-                actual_rerun_output_dir_abs = os.path.abspath(os.path.join(proj_root_dir, dir_option_value_from_client))
-                add_output_line_to_job(job_id, f"MSIM -dir was '{dir_option_value_from_client}'. Absolute output path for logs: {actual_rerun_output_dir_abs}")
+            if not os.path.isdir(rerun_base_dir_for_logs):
+                add_output_line_to_job(job_id, f"Warning: Calculated log search directory '{rerun_base_dir_for_logs}' does not exist or is not a directory. Cannot find new logs.")
+                new_batch_log_path = None
             else:
-                # If -dir was NOT used by msim command.
-                # `msim rerun -t rerun` might create outputs in PRJ_ICDIR/sim/... or PRJ_ICDIR/<vcs_context>/sim/...
-                # This scenario is harder to predict without knowing `msim rerun`'s exact behavior for the 'rerun' config.
-                # For now, if -dir is not used, we'll assume output is relative to PRJ_ICDIR.
-                # This might mean individual test logs are harder to pinpoint without a specific rerun directory.
-                # Let's assume for now that if -dir is not specified, the output is directly in PRJ_ICDIR/sim/testname/latest
-                # This is a simplification. A more robust solution would require knowing msim's default output for `msim rerun -t rerun`.
-                actual_rerun_output_dir_abs = proj_root_dir # This is the CWD of msim.
-                add_output_line_to_job(job_id, f"Warning: MSIM -dir option not specified by client. Assuming logs are relative to PRJ_ICDIR ({proj_root_dir}). Individual log parsing might be less reliable.")
+                new_batch_log_path = find_primary_log_for_rerun(rerun_base_dir_for_logs)
 
-            if not actual_rerun_output_dir_abs or not os.path.isdir(actual_rerun_output_dir_abs):
-                 add_output_line_to_job(job_id, f"Warning: Rerun output directory '{actual_rerun_output_dir_abs}' is not valid. Detailed status update will be limited to MSIM stdout.")
-                 # Pass None for path, so it relies only on msim_stdout
-                 detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout, options.get('selectedCases', []), None, options.get('vcsContext', "unknown-vcs"), job_id)
+            if new_batch_log_path:
+                add_output_line_to_job(job_id, f"Found new primary log file for the rerun batch: {new_batch_log_path}")
             else:
-                vcs_context_name = options.get('vcsContext', 'unknown-vcs') 
-                detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout, options.get('selectedCases', []), actual_rerun_output_dir_abs, vcs_context_name, job_id)
-            
+                add_output_line_to_job(job_id, f"Warning: Could not find a run.log or comp.log for the rerun batch in '{rerun_base_dir_for_logs}' or its subdirectories.")
+
+            detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout, options.get('selectedCases', []), new_batch_log_path)
             JOB_STATUS[job_id]['detailed_test_results'] = detailed_results
-            add_output_line_to_job(job_id, f"Final detailed test results: {detailed_results}")
+            add_output_line_to_job(job_id, f"Parsed detailed test results (includes new log path if found): {detailed_results}")
 
         except FileNotFoundError:
             update_job_status(job_id, "failed", "MSIM command not found. Ensure msim is in PATH.")
@@ -626,35 +518,36 @@ def long_running_rerun_task(job_id, options):
             add_output_line_to_job(job_id, f"Error during MSIM execution: {str(e)}")
         finally:
             pass
-    except Exception as e: 
-        app.logger.error(f"CRITICAL ERROR IN TASK {job_id}: {str(e)}", exc_info=True) 
+    except Exception as e:
+        bp.logger.error(f"CRITICAL ERROR IN TASK {job_id}: {str(e)}", exc_info=True)
         update_job_status(job_id, "failed", f"Critical error in task: {str(e)}")
         add_output_line_to_job(job_id, f"CRITICAL_TASK_ERROR: {str(e)}")
     finally:
-        app.logger.info(f"--- Task ended for job_id: {job_id} ---") 
+        print(f"--- Task ended for job_id: {job_id} ---")
 
-@app.route('/rerun', methods=['POST'])
-def rerun_cases():
-    app.logger.info(f"--- /rerun endpoint hit ---")
+@bp.route('/rerun/<repo_id>', methods=['POST'])
+def rerun_cases(repo_id):
+    print('rerun live_reporter repo_id is {repo_id}')
+    print(f"--- /rerun endpoint hit ---")
     try:
         data = request.get_json()
-        app.logger.info(f"Request data: {data}")
+        print(f"Request data: {data}")
 
         if not data or 'selectedCases' not in data:
-            app.logger.warning("Bad request to /rerun: No selectedCases provided.")
+            bp.logger.warning("Bad request to /rerun: No selectedCases provided.")
             return jsonify({"status": "error", "message": "No selectedCases provided"}), 400
 
         job_id = str(uuid.uuid4())
-        app.logger.info(f"Generated job_id: {job_id} for /rerun request.")
+        print(f"Generated job_id: {job_id} for /rerun request.")
         JOB_STATUS[job_id] = {"status": "queued", "message": "Rerun job queued.", "output_lines": []}
-        
+
         thread = threading.Thread(target=long_running_rerun_task, args=(job_id, data))
         thread.start()
-        app.logger.info(f"Worker thread started for job_id: {job_id}")
-        
+        print(f"Worker thread started for job_id: {job_id}")
+
         return jsonify({"status": "queued", "message": "Rerun job initiated.", "job_id": job_id})
     except Exception as e:
-        app.logger.error(f"Exception in /rerun endpoint: {e}", exc_info=True)
+        bp.logger.error(f"Exception in /rerun endpoint: {e}", exc_info=True)
         error_job_id = locals().get('job_id', str(uuid.uuid4()) + "_error")
         if error_job_id not in JOB_STATUS and 'job_id' in locals():
              JOB_STATUS[error_job_id] = {"status": "failed", "message": f"Server error in /rerun: {e}", "output_lines": []}
@@ -663,14 +556,19 @@ def rerun_cases():
 
         return jsonify({"status": "error", "message": f"Internal server error: {e}", "job_id": error_job_id if 'job_id' in locals() else None }), 500
 
-@app.route('/rerun_status/<job_id>', methods=['GET'])
+@bp.route('/rerun_status/<job_id>', methods=['GET'])
 def get_rerun_status(job_id):
     status_info = get_job_status(job_id)
     return jsonify(status_info)
 
-@app.route('/')
-def index():
-    return send_from_directory(script_dir, 'interactive_live_report.html')
+@bp.route('/<repo_id>')
+def index(repo_id):
+    repo = Repo.query.get_or_404(repo_id)
+    print(repo.result)
+    html_rpt = repo.result['html_rpt']
+    directory = os.path.dirname(html_rpt)
+    filename = os.path.basename(html_rpt)
+    return send_from_directory(directory, filename)
 
 
 if __name__ == '__main__':
@@ -680,5 +578,6 @@ if __name__ == '__main__':
     print("The server will attempt to start on a fixed port (5000).")
     print("If port 5000 is unavailable, the server will fail to start.")
     print("Expected running address: http://127.0.0.1:5000/")
-    
-    app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)
+
+    bp.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)
+

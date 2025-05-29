@@ -1,0 +1,52 @@
+# AI_HTML/live_report_server_new.py 合并变更说明
+
+本文档总结了 `AI_HTML/live_report_server_new.py` 文件相对于其基础版本 `AI_HTML/live_report_server.py` (已包含详细Rerun状态反馈功能的版本) 的主要变更点。这些变更主要源自 `AI_HTML/live_report_server_change.py` 文件中引入的架构概念。
+
+**基础文件**: `AI_HTML/live_report_server.py` (包含详细Rerun状态反馈功能的版本)
+**架构变更源**: `AI_HTML/live_report_server_change.py` (引入Blueprint和数据库集成的版本)
+**合并结果文件**: `AI_HTML/live_report_server_new.py`
+
+## 主要集成变更点：
+
+1.  **Flask Blueprint 集成**:
+    *   **Imports**:
+        *   从 `flask` 增加了 `Blueprint` 和 `render_template` 的导入。
+    *   **Blueprint 定义**:
+        *   新增了 `bp = Blueprint('live_reporter', __name__, template_folder=...)` 的定义，用于模块化应用。
+        *   `template_folder` 的路径计算考虑了项目结构。
+    *   **路由变更**:
+        *   所有的 `@app.route` 装饰器均修改为 `@bp.route`。
+    *   **日志记录**:
+        *   在 `rerun_cases` 和 `long_running_rerun_task` 等函数中，对日志记录器的使用进行了调整，以适应在 Blueprint 和 Flask 应用上下文（尤其是在线程中）正确获取和使用 logger 实例 (例如，通过参数 `current_app_logger` 传递给线程)。
+    *   **独立运行支持**:
+        *   `if __name__ == '__main__':` 代码块被修改：
+            *   创建一个独立的 `Flask` 应用实例 (`app = Flask(__name__)`)。
+            *   将定义的 Blueprint (`bp`) 注册到此 `app` 上 (`app.register_blueprint(bp)`)。
+            *   对主 `app` 应用 CORS (`CORS(app)`)。
+            *   最后通过 `app.run()` 启动服务。这使得 `live_report_server_new.py` 可以作为独立服务运行。
+
+2.  **数据库集成与动态内容服务**:
+    *   **Imports**:
+        *   增加了 `from models import Repo` 和 `from extensions import db` 的导入。
+        *   这些导入被包含在 `try-except ImportError` 块中，以便在 `models` 或 `extensions` 模块不可用时（例如，在没有完整数据库环境的情况下运行脚本），程序可以优雅降级并打印警告，而不是直接崩溃。
+    *   **`/` (首页) 路由变更 (`@bp.route('/<repo_id>')`)**:
+        *   路由现在接受一个 `<repo_id>` 参数。
+        *   函数内部通过 `Repo.query.get_or_404(repo_id)` 从数据库查询与 `repo_id` 对应的仓库信息。
+        *   基于查询结果中的 `repo.result['html_rpt']`（假定为HTML报告的绝对路径），使用 `send_from_directory` 动态提供HTML报告文件。
+    *   **`/rerun` 路由变更 (`@bp.route('/rerun/<repo_id>', methods=['POST'])`)**:
+        *   路由现在也接受一个 `<repo_id>` 参数，以支持针对特定仓库的Rerun操作。该 `repo_id` 在当前合并版本中暂未在函数体内直接使用，但路由已按此结构定义。
+
+3.  **路径与配置调整**:
+    *   `base_dir_for_templates`: 为 Blueprint 的 `template_folder` 参数计算了合适的路径。
+    *   `script_dir`: 保持为 `os.path.dirname(os.path.abspath(__file__))`，指向当前脚本所在的 `AI_HTML` 目录。
+
+4.  **原有核心功能保留**:
+    *   所有在基础版本 `AI_HTML/live_report_server.py` 中实现的详细Rerun状态反馈逻辑都得到了完整保留。这包括：
+        *   辅助函数 `_parse_individual_parse_run_log`。
+        *   增强版的 `parse_msim_output_for_test_statuses` 函数，它能够解析单个测试的 `parse_run.log` 并提供更精确的日志路径。
+        *   在 `long_running_rerun_task` 函数中对 `parse_msim_output_for_test_statuses` 的正确调用和参数传递（包括 `rerun_actual_output_dir_abs_path` 和 `vcs_context_name`）。
+        *   `JOB_STATUS` 字典的结构和更新逻辑，以及 `add_output_line_to_job` 函数。
+        *   `find_primary_log_for_rerun` 函数。
+        *   `prepare_rerun_hjson_files` 函数。
+
+这些变更是为了将原有的、功能较为单一的 Flask 应用，改造成一个更具模块化、可扩展性，并能与数据库交互以支持多报告/多仓库场景的Web服务，同时保留了已实现的精细化Rerun状态追踪功能。

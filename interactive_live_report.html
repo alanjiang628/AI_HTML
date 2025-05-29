@@ -111,7 +111,7 @@
             <label><input type="checkbox" id="openCoverage"> Open Coverage</label>
         </div>
         <div class="console-item">
-            <label><input type="checkbox" id="rebuildCases"> Rebuild All Selected Cases</label>
+            <label><input type="checkbox" id="rebuildCases" checked> Rebuild All Selected Cases</label>
         </div>
         <div class="console-item">
             <label><input type="checkbox" id="includeWaveform"> Include Waveform in Rebuild</label>
@@ -138,7 +138,7 @@
         </div>
     </div>
     <div class="button-bar">
-        <button onclick="selectAllNonPassed()">Select All Non-Passed Cases</button>
+        <button id="selectNonPassedButton" onclick="selectAllNonPassed()">Select All Non-Passed Cases</button>
         <button id="runRegressionButton" onclick="runRegression()">Run Selected Cases</button>
     </div>
 </div>
@@ -186,7 +186,7 @@
 </thead>
 <tbody>
 <tr>
-<td align="left">mtu_ch1_write_updata_write_match_write_transfer_test (Seed: 2309781139)</td>
+<td align="left">mtu_smoke (Seed: 2309781139)</td>
 <td align="center" class="status-K">K</td>
 <td align="center">0%</td>
 <td align="left"><code>sim/mtu_ch1_write_updata_write_match_write_transfer_test.1/2025-05-21_16-52-27-549608/run.log</code></td>
@@ -194,7 +194,7 @@
 <td align="center"><input type="checkbox" class="rerun-checkbox" data-casename="mtu_ch1_write_updata_write_match_write_transfer_test" data-seed="2309781139"></td>
 </tr>
 <tr>
-<td align="left">mtu_ch1_write_updata_write_match_write_transfer_test (Seed: 3668249552)</td>
+<td align="left">mtu_smoke (Seed: 3668249552)</td>
 <td align="center" class="status-K">K</td>
 <td align="center">0%</td>
 <td align="left"><code>sim/mtu_ch1_write_updata_write_match_write_transfer_test.0/2025-05-21_16-52-27-549608/run.log</code></td>
@@ -236,26 +236,51 @@ Log: <code>/scratch/project/M0001/users/wenxuan.chen/mtu_dv/work/msim_report_v3p
 </div>
 
 <script>
+// State variable for toggling selectAllNonPassed functionality
+window.nonPassedCasesSelected = false;
+
 function selectAllNonPassed() {
-    console.log("selectAllNonPassed called");
+    console.log("selectAllNonPassed called, current state nonPassedCasesSelected:", window.nonPassedCasesSelected);
     const checkboxes = document.querySelectorAll('#detailedStatusTable tbody .rerun-checkbox');
     const rows = document.querySelectorAll('#detailedStatusTable tbody tr');
+    const button = document.getElementById('selectNonPassedButton');
 
-    rows.forEach((row, index) => {
-        // Ensure we don't try to process a summary row if it doesn't have the checkbox
-        if (checkboxes[index]) {
-            const statusCell = row.cells[1]; // Assuming status is the second cell
-            if (statusCell) {
-                const status = statusCell.innerText.trim().toUpperCase();
-                // P = PASSED, F = Failed, K = Killed, D = Dispatched/Running, Q = Queued
-                if (status !== 'P') {
-                    checkboxes[index].checked = true;
-                } else {
-                    checkboxes[index].checked = false; // Optionally uncheck passed cases
+    if (!window.nonPassedCasesSelected) {
+        // Action: Select all non-passed cases
+        rows.forEach((row, index) => {
+            if (checkboxes[index]) { // Ensure checkbox exists for the row
+                const statusCell = row.cells[1]; // Status is the second cell
+                if (statusCell) {
+                    const status = statusCell.innerText.trim().toUpperCase();
+                    if (status !== 'P') { // P = PASSED
+                        checkboxes[index].checked = true;
+                    } else {
+                        // Optional: ensure passed cases are unchecked if that's desired behavior
+                        // checkboxes[index].checked = false; 
+                    }
                 }
             }
-        }
-    });
+        });
+        window.nonPassedCasesSelected = true;
+        if (button) button.innerText = "Deselect Non-Passed Cases";
+        console.log("Selected non-passed. New state nonPassedCasesSelected:", window.nonPassedCasesSelected);
+    } else {
+        // Action: Deselect all non-passed cases (or all cases selected by this button)
+        rows.forEach((row, index) => {
+            if (checkboxes[index]) { // Ensure checkbox exists for the row
+                 const statusCell = row.cells[1]; // Status is the second cell
+                 if (statusCell) {
+                    const status = statusCell.innerText.trim().toUpperCase();
+                    if (status !== 'P') { // Only deselect those that are non-passed
+                        checkboxes[index].checked = false;
+                    }
+                 }
+            }
+        });
+        window.nonPassedCasesSelected = false;
+        if (button) button.innerText = "Select All Non-Passed Cases";
+        console.log("Deselected non-passed. New state nonPassedCasesSelected:", window.nonPassedCasesSelected);
+    }
 }
 
 let currentJobId = null;

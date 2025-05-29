@@ -113,37 +113,77 @@ def find_primary_log_for_rerun(base_search_path):
     print(f"No run.log or comp.log found in {base_search_path} after checking common locations and deep search.")
     return None
 
-def parse_msim_output_for_test_statuses(msim_stdout, selected_cases_with_seed, rerun_actual_output_dir_abs_path, vcs_context_name, job_id_for_logging=None):
+def parse_msim_output_for_test_statuses(msim_stdout, selected_cases_with_seed,
+                                        actual_sim_root_for_parsing, # Absolute path to the .../sim/ directory
+                                        base_log_path_for_html,      # Relative path prefix for HTML links, e.g., work/.../vcs-context
+                                        job_id_for_logging=None):
+    """
+    Parses MSIM stdout and individual test logs to extract final status for each test.
+    actual_sim_root_for_parsing: Absolute path to the directory containing individual case_id_variant simulation dirs (e.g., /path/to/PRJ_ICDIR/work/.../vcs-context/sim).
+                                 If None or invalid, parsing individual logs will be skipped.
+    base_log_path_for_html: The base relative path used for constructing HTML log links (e.g., "work/report_dir/mtu-vcs" or "work/user_dir_opt/mtu-vcs").
+    Returns a list of dictionaries: [{'id': 'test_case_name_seedXXXX', 'status': 'PASSED'/'FAILED'/'UNKNOWN',
+                                     'error_hint': '...', 'new_log_path': 'relative/path/to/new/run.log'}]
+    """
     results_map = {}
-    rerun_dir_basename = os.path.basename(rerun_actual_output_dir_abs_path) if rerun_actual_output_dir_abs_path and os.path.isdir(rerun_actual_output_dir_abs_path) else "unknown_rerun_dir"
+
     if job_id_for_logging:
-        add_output_line_to_job(job_id_for_logging, f"Starting detailed status parsing. Rerun output dir: {rerun_actual_output_dir_abs_path}, VCS context: {vcs_context_name}")
+        add_output_line_to_job(job_id_for_logging, f"Starting detailed status parsing. Sim root for parsing: {actual_sim_root_for_parsing}, Base HTML log path: {base_log_path_for_html}")
+
+    if not base_log_path_for_html and actual_sim_root_for_parsing:
+         add_output_line_to_job(job_id_for_logging, "Warning: base_log_path_for_html is missing, HTML log paths might be incorrect.")
 
     for case_id in selected_cases_with_seed:
-        # base_test_name = case_id.split("_seed")[0] # Not needed for path construction if using case_id directly
         current_status = "UNKNOWN"
         error_hint = "Status not determined."
-        # Use case_id (full name with seed) for the test directory in default HTML log path
-        html_log_path = f"{vcs_context_name}/{rerun_dir_basename}/sim/{case_id}/latest/run.log" # Default/fallback
+        
+        safe_base_html_path = base_log_path_for_html.replace(os.sep, '/') if base_log_path_for_html else "unknown_html_base"
+        html_log_path = f"{safe_base_html_path}/sim/{case_id}/latest/run.log" # Default fallback
 
-        if rerun_actual_output_dir_abs_path and os.path.isdir(rerun_actual_output_dir_abs_path):
-            # Use case_id (full name with seed) for the individual test simulation directory
-            individual_test_sim_dir = os.path.join(rerun_actual_output_dir_abs_path, 'sim', case_id)
-            latest_log_dir = os.path.join(individual_test_sim_dir, 'latest')
-            if not os.path.isdir(latest_log_dir):
-                if os.path.isdir(individual_test_sim_dir):
-                    subdirs = [os.path.join(individual_test_sim_dir, d) for d in os.listdir(individual_test_sim_dir) if os.path.isdir(os.path.join(individual_test_sim_dir, d))]
-                    latest_log_dir = max(subdirs, key=os.path.getmtime) if subdirs else None
-                else:
-                    latest_log_dir = None
+        case_id_variant_dir_name = None
+        individual_test_sim_dir_actual = None 
+
+        if actual_sim_root_for_parsing and os.path.isdir(actual_sim_root_for_parsing):
+            try:
+                found_match = False
+                dir_items = sorted(os.listdir(actual_sim_root_for_parsing)) 
+                for item_name in dir_items:
+                    item_path = os.path.join(actual_sim_root_for_parsing, item_name)
+                    if os.path.isdir(item_path) and item_name.startswith(case_id):
+                        case_id_variant_dir_name = item_name
+                        individual_test_sim_dir_actual = item_path
+                        if job_id_for_logging:
+                            add_output_line_to_job(job_id_for_logging, f"For {case_id}: Found matching sim directory: {case_id_variant_dir_name} at {individual_test_sim_dir_actual}")
+                        found_match = True
+                        break 
+                if not found_match and job_id_for_logging:
+                     add_output_line_to_job(job_id_for_logging, f"For {case_id}: No directory starting with '{case_id}' found in '{actual_sim_root_for_parsing}'.")
+            except Exception as e:
+                if job_id_for_logging:
+                    add_output_line_to_job(job_id_for_logging, f"For {case_id}: Error listing or processing sim dirs in '{actual_sim_root_for_parsing}': {e}")
             
-            if latest_log_dir and os.path.isdir(latest_log_dir):
-                parse_run_log_path = os.path.join(latest_log_dir, 'parse_run.log')
-                timestamp_or_latest_name = os.path.basename(latest_log_dir)
-                # Use case_id (full name with seed) for the test directory in specific HTML log path
-                html_log_path = f"{vcs_context_name}/{rerun_dir_basename}/sim/{case_id}/{timestamp_or_latest_name}/run.log"
-                if job_id_for_logging: add_output_line_to_job(job_id_for_logging, f"For {case_id}: Checking parse_run.log at {parse_run_log_path}")
-                status_from_parse_log = _parse_individual_parse_run_log(parse_run_log_path)
+            if individual_test_sim_dir_actual and os.path.isdir(individual_test_sim_dir_actual):
+                latest_log_dir = os.path.join(individual_test_sim_dir_actual, 'latest')
+                if not os.path.isdir(latest_log_dir):
+                    if job_id_for_logging:
+                        add_output_line_to_job(job_id_for_logging, f"For {case_id} (in {case_id_variant_dir_name}): 'latest' symlink not found. Searching for newest timestamped directory...")
+                    subdirs = [d for d in os.listdir(individual_test_sim_dir_actual) if os.path.isdir(os.path.join(individual_test_sim_dir_actual, d))]
+                    if subdirs:
+                        timestamped_subdirs = [os.path.join(individual_test_sim_dir_actual, d) for d in subdirs]
+                        if timestamped_subdirs:
+                            latest_log_dir = max(timestamped_subdirs, key=os.path.getmtime)
+                            if job_id_for_logging:
+                                add_output_line_to_job(job_id_for_logging, f"For {case_id} (in {case_id_variant_dir_name}): Found newest timestamped dir: {os.path.basename(latest_log_dir)}")
+                        else: latest_log_dir = None
+                    else: latest_log_dir = None
+                
+                if latest_log_dir and os.path.isdir(latest_log_dir):
+                    parse_run_log_path = os.path.join(latest_log_dir, 'parse_run.log')
+                    timestamp_or_latest_name = os.path.basename(latest_log_dir)
+                    html_log_path = f"{safe_base_html_path}/sim/{case_id_variant_dir_name.replace(os.sep, '/')}/{timestamp_or_latest_name.replace(os.sep, '/')}/run.log"
+                    
+                    if job_id_for_logging: add_output_line_to_job(job_id_for_logging, f"For {case_id} (in {case_id_variant_dir_name}): Checking parse_run.log at {parse_run_log_path}")
+                    status_from_parse_log = _parse_individual_parse_run_log(parse_run_log_path)
                 if status_from_parse_log:
                     current_status = status_from_parse_log
                     error_hint = "Failed (from parse_run.log)" if current_status == "FAILED" else ("" if current_status == "PASSED" else "Status unclear from parse_run.log")
@@ -370,26 +410,56 @@ def long_running_rerun_task(job_id, options, current_app_logger): # Added curren
             add_output_line_to_job(job_id, final_status_message)
             full_msim_stdout = "\n".join(JOB_STATUS[job_id].get("output_lines", []))
             
+            # Determine paths for log parsing and HTML links
             proj_root_dir = os.environ.get('PRJ_ICDIR')
-            actual_rerun_output_dir_abs = None
-            dir_option_value_from_client = options.get('dirOption', '').strip()
-            vcs_context_name_from_options = options.get('branchPath', 'unknown-vcs') # branchPath is used as vcsContext
+            dir_option_value = options.get('dirOption', '').strip()
+            full_branch_path = options.get('branchPath', '') 
+            vcs_context = options.get('vcsContext', '')     
 
+            actual_sim_root_for_parsing = None 
+            base_log_path_for_html = None      
+
+            log_path_error = False
             if not proj_root_dir:
-                add_output_line_to_job(job_id, "CRITICAL Error: PRJ_ICDIR not set. Cannot determine abs path for rerun logs.")
-                detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout, options.get('selectedCases', []), None, vcs_context_name_from_options, job_id)
-            elif dir_option_value_from_client:
-                actual_rerun_output_dir_abs = os.path.abspath(os.path.join(proj_root_dir, dir_option_value_from_client))
-                add_output_line_to_job(job_id, f"MSIM -dir was '{dir_option_value_from_client}'. Abs output path: {actual_rerun_output_dir_abs}")
-            else: # -dir not used
-                actual_rerun_output_dir_abs = proj_root_dir 
-                add_output_line_to_job(job_id, f"Warning: MSIM -dir not specified. Assuming logs relative to PRJ_ICDIR ({proj_root_dir}).")
-
-            if not actual_rerun_output_dir_abs or not os.path.isdir(actual_rerun_output_dir_abs):
-                 add_output_line_to_job(job_id, f"Warning: Rerun output directory '{actual_rerun_output_dir_abs}' not valid. Status update limited.")
-                 detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout, options.get('selectedCases', []), None, vcs_context_name_from_options, job_id)
+                add_output_line_to_job(job_id, "CRITICAL Error: PRJ_ICDIR environment variable is not set. Cannot determine absolute path for rerun logs.")
+                log_path_error = True
             else:
-                detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout, options.get('selectedCases', []), actual_rerun_output_dir_abs, vcs_context_name_from_options, job_id)
+                if dir_option_value:
+                    vcs_context_basename = os.path.basename(vcs_context) if vcs_context else ""
+                    if not vcs_context_basename:
+                         add_output_line_to_job(job_id, f"Warning: vcsContext is empty or invalid when -dir is specified ('{dir_option_value}'). HTML log paths might be incorrect.")
+                    
+                    actual_sim_root_for_parsing = os.path.join(proj_root_dir, "work", dir_option_value, vcs_context_basename, "sim")
+                    base_log_path_for_html = os.path.join("work", dir_option_value, vcs_context_basename)
+                    add_output_line_to_job(job_id, f"Mode: -dir specified ('{dir_option_value}'). VCS Context for path: '{vcs_context_basename}'.")
+                else:
+                    extracted_branch_suffix = ""
+                    if "work/" in full_branch_path:
+                        extracted_branch_suffix = full_branch_path.split("work/", 1)[1] 
+                    
+                    if not extracted_branch_suffix:
+                        add_output_line_to_job(job_id, f"CRITICAL Error: Could not extract 'work/...' suffix from branchPath: '{full_branch_path}'. Required when -dir is not specified.")
+                        log_path_error = True
+                    else:
+                        actual_sim_root_for_parsing = os.path.join(proj_root_dir, extracted_branch_suffix, "sim")
+                        base_log_path_for_html = extracted_branch_suffix 
+                        add_output_line_to_job(job_id, f"Mode: -dir NOT specified. Using branch suffix for paths: '{extracted_branch_suffix}'.")
+
+            if not log_path_error:
+                add_output_line_to_job(job_id, f"  Calculated absolute sim root for parsing: {actual_sim_root_for_parsing}")
+                add_output_line_to_job(job_id, f"  Calculated base relative path for HTML logs: {base_log_path_for_html}")
+
+            if log_path_error or not actual_sim_root_for_parsing or not os.path.isdir(actual_sim_root_for_parsing):
+                 warning_msg = f"Rerun sim root directory for parsing ('{actual_sim_root_for_parsing}') is not valid or not found."
+                 if log_path_error and not actual_sim_root_for_parsing : warning_msg = "Critical error in path calculation prevented log search."
+                 add_output_line_to_job(job_id, f"Warning: {warning_msg} Detailed status update will be limited to MSIM stdout.")
+                 detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout, options.get('selectedCases', []),
+                                                                    None, None, job_id) 
+            else:
+                detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout, options.get('selectedCases', []),
+                                                                    actual_sim_root_for_parsing,
+                                                                    base_log_path_for_html,
+                                                                    job_id)
             JOB_STATUS[job_id]['detailed_test_results'] = detailed_results
             add_output_line_to_job(job_id, f"Final detailed test results: {detailed_results}")
         except FileNotFoundError:

@@ -1,0 +1,150 @@
+## AI_HTML/interactive_live_report.html 变更差异说明
+
+本文档指出了为实现以下功能对 `AI_HTML/interactive_live_report.html` 文件所做的具体代码行修改：
+1.  "Rebuild All Selected Cases" 复选框默认勾选。
+2.  "Select All Non-Passed Cases" 按钮支持切换选择/取消选择，并更新按钮文本。
+
+---
+
+**变更1: "Rebuild All Selected Cases" 复选框默认勾选**
+
+**涉及原文件行号:** 约 127
+
+**原代码 (部分 - 原文件约第127行):**
+```html
+        </div>
+        <div class="console-item">
+            <label><input type="checkbox" id="rebuildCases"> Rebuild All Selected Cases</label>
+        </div>
+        <div class="console-item">
+```
+
+**修改后代码 (部分):**
+```html
+        </div>
+        <div class="console-item">
+            <label><input type="checkbox" id="rebuildCases" checked> Rebuild All Selected Cases</label>
+        </div>
+        <div class="console-item">
+```
+**说明:** 在原文件约第127行的 `id="rebuildCases"` 的 `input` 标签中添加了 `checked` 属性。
+
+---
+
+**变更2: "Select All Non-Passed Cases" 按钮增加ID，并修改其JavaScript函数以支持切换选择**
+
+**2.1: 为按钮添加ID**
+
+**涉及原文件行号:** 约 147
+
+**原代码 (部分 - 原文件约第147行):**
+```html
+    </div>
+    <div class="button-bar">
+        <button onclick="selectAllNonPassed()">Select All Non-Passed Cases</button>
+        <button id="runRegressionButton" onclick="runRegression()">Run Selected Cases</button>
+    </div>
+</div>
+```
+
+**修改后代码 (部分):**
+```html
+    </div>
+    <div class="button-bar">
+        <button id="selectNonPassedButton" onclick="selectAllNonPassed()">Select All Non-Passed Cases</button>
+        <button id="runRegressionButton" onclick="runRegression()">Run Selected Cases</button>
+    </div>
+</div>
+```
+**说明:** 给原文件约第147行的 "Select All Non-Passed Cases" 按钮添加了 `id="selectNonPassedButton"`。
+
+**2.2: 修改 `selectAllNonPassed()` JavaScript 函数并添加状态变量**
+
+**涉及原文件行号:**
+*   新增状态变量: 插入到原 `<script>` 标签内的起始位置 (原文件约第221行之前，即新代码的第1行在脚本块内)。
+*   函数重写: 原 `selectAllNonPassed` 函数 (原文件约第221行至第239行) 被替换。
+
+**原 `selectAllNonPassed()` 函数 (原文件约第221-239行):**
+```javascript
+function selectAllNonPassed() {
+    console.log("selectAllNonPassed called");
+    const checkboxes = document.querySelectorAll('#detailedStatusTable tbody .rerun-checkbox');
+    const rows = document.querySelectorAll('#detailedStatusTable tbody tr');
+
+    rows.forEach((row, index) => {
+        // Ensure we don't try to process a summary row if it doesn't have the checkbox
+        if (checkboxes[index]) {
+            const statusCell = row.cells[1]; // Assuming status is the second cell
+            if (statusCell) {
+                const status = statusCell.innerText.trim().toUpperCase();
+                // P = PASSED, F = Failed, K = Killed, D = Dispatched/Running, Q = Queued
+                if (status !== 'P') {
+                    checkboxes[index].checked = true;
+                } else {
+                    checkboxes[index].checked = false; // Optionally uncheck passed cases
+                }
+            }
+        }
+    });
+}
+```
+
+**修改后 (在 `<script>` 标签顶部添加状态变量，并重写函数):**
+```javascript
+// State variable for toggling selectAllNonPassed functionality
+// This line is ADDED at the beginning of the <script> block (originally around line 221)
+window.nonPassedCasesSelected = false;
+
+// This function REPLACES the original selectAllNonPassed function (originally lines ~221-239)
+function selectAllNonPassed() {
+    console.log("selectAllNonPassed called, current state nonPassedCasesSelected:", window.nonPassedCasesSelected);
+    const checkboxes = document.querySelectorAll('#detailedStatusTable tbody .rerun-checkbox');
+    const rows = document.querySelectorAll('#detailedStatusTable tbody tr');
+    const button = document.getElementById('selectNonPassedButton');
+
+    if (!window.nonPassedCasesSelected) {
+        // Action: Select all non-passed cases
+        rows.forEach((row, index) => {
+            if (checkboxes[index]) { // Ensure checkbox exists for the row
+                const statusCell = row.cells[1]; // Status is the second cell
+                if (statusCell) {
+                    const status = statusCell.innerText.trim().toUpperCase();
+                    if (status !== 'P') { // P = PASSED
+                        checkboxes[index].checked = true;
+                    } else {
+                        // Optional: ensure passed cases are unchecked if that's desired behavior
+                        // checkboxes[index].checked = false; 
+                    }
+                }
+            }
+        });
+        window.nonPassedCasesSelected = true;
+        if (button) button.innerText = "Deselect Non-Passed Cases";
+        console.log("Selected non-passed. New state nonPassedCasesSelected:", window.nonPassedCasesSelected);
+    } else {
+        // Action: Deselect all non-passed cases (or all cases selected by this button)
+        rows.forEach((row, index) => {
+            if (checkboxes[index]) { // Ensure checkbox exists for the row
+                 const statusCell = row.cells[1]; // Status is the second cell
+                 if (statusCell) {
+                    const status = statusCell.innerText.trim().toUpperCase();
+                    if (status !== 'P') { // Only deselect those that are non-passed
+                        checkboxes[index].checked = false;
+                    }
+                 }
+            }
+        });
+        window.nonPassedCasesSelected = false;
+        if (button) button.innerText = "Select All Non-Passed Cases";
+        console.log("Deselected non-passed. New state nonPassedCasesSelected:", window.nonPassedCasesSelected);
+    }
+}
+```
+**说明:**
+*   在原文件约第221行（即 `<script>` 块的开始处，在所有原函数定义之前）添加了全局状态变量 `window.nonPassedCasesSelected = false;`。
+*   原文件约第221行至第239行的 `selectAllNonPassed` 函数被重写，以根据 `window.nonPassedCasesSelected` 的状态来切换选择/取消选择非通过用例，并相应地更新按钮（通过其新ID `selectNonPassedButton` 获取）的文本。
+
+---
+
+这些是主要的改动点，旨在方便其他工程师理解和集成这些功能。
+(行号是基于对原始文件结构的估算，具体行号可能因编辑器或细微的格式差异略有不同，但代码片段定位是准确的。)

@@ -381,8 +381,33 @@ def long_running_rerun_task(job_id, options, current_app_logger): # Added curren
             sim_time_hours = int(sim_time_hours_str)
             if sim_time_hours > 0: sim_time_minutes = sim_time_hours * 60; msim_command_parts.extend(["-rto", str(sim_time_minutes)]); add_output_line_to_job(job_id, f"Adding -rto {sim_time_minutes}")
         except ValueError: add_output_line_to_job(job_id, f"Warning: Invalid simTimeHours: {sim_time_hours_str}. Not adding -rto.")
-        dir_option_value = options.get('dirOption', '').strip()
-        if dir_option_value: msim_command_parts.extend(["-dir", dir_option_value]); add_output_line_to_job(job_id, f"Adding -dir {dir_option_value}")
+
+        # Determine the final -dir option for msim command
+        user_specified_dir_option = options.get('dirOption', '').strip()
+        full_branch_path_for_msim_dir_derivation = options.get('branchPath', '') # Used if user_specified_dir_option is empty
+        final_msim_dir_option = None
+
+        if user_specified_dir_option:
+            final_msim_dir_option = user_specified_dir_option
+            add_output_line_to_job(job_id, f"User specified -dir: '{final_msim_dir_option}'. This will be used for msim command.")
+        else:
+            add_output_line_to_job(job_id, "User did not specify -dir. Attempting to derive from branchPath.")
+            if "work/" in full_branch_path_for_msim_dir_derivation:
+                path_after_work = full_branch_path_for_msim_dir_derivation.split("work/", 1)[1] # e.g., "msim_report_v3p0_2/mtu-vcs"
+                derived_dir_for_msim = os.path.normpath(path_after_work).split(os.sep)[0]
+                if derived_dir_for_msim and derived_dir_for_msim != '.' and derived_dir_for_msim != os.path.basename(path_after_work):
+                    final_msim_dir_option = derived_dir_for_msim
+                    add_output_line_to_job(job_id, f"Derived msim -dir from branchPath ('{full_branch_path_for_msim_dir_derivation}') as: '{final_msim_dir_option}'.")
+                else:
+                    add_output_line_to_job(job_id, f"Warning: Could not derive a valid directory for msim -dir from branchPath '{full_branch_path_for_msim_dir_derivation}' (path after work: '{path_after_work}', derived: '{derived_dir_for_msim}').")
+            else:
+                add_output_line_to_job(job_id, f"Warning: 'work/' not found in branchPath '{full_branch_path_for_msim_dir_derivation}'. Cannot derive implicit -dir for msim.")
+
+        if final_msim_dir_option:
+            msim_command_parts.extend(["-dir", final_msim_dir_option])
+        else:
+            add_output_line_to_job(job_id, "MSIM command will not include an explicit -dir option (neither user-specified nor successfully derived).")
+
         elab_opts_value = options.get('elabOpts', '').strip()
         if elab_opts_value: msim_command_parts.extend(["-elab", elab_opts_value]); add_output_line_to_job(job_id, f"Adding -elab \"{elab_opts_value}\"")
         vlogan_opts_value = options.get('vloganOpts', '').strip()
@@ -411,43 +436,53 @@ def long_running_rerun_task(job_id, options, current_app_logger): # Added curren
             full_msim_stdout = "\n".join(JOB_STATUS[job_id].get("output_lines", []))
             
             # Determine paths for log parsing and HTML links
+            # This uses `final_msim_dir_option` (determined before msim command) and `vcs_context` from client.
             proj_root_dir = os.environ.get('PRJ_ICDIR')
-            dir_option_value = options.get('dirOption', '').strip()
-            full_branch_path = options.get('branchPath', '') 
-            vcs_context = options.get('vcsContext', '')     
+            # `final_msim_dir_option` is the one ACTUALLY passed to `msim -dir`
+            # `full_branch_path_for_log_parsing` is options.get('branchPath', '')
+            # `vcs_context_from_client_for_log_parsing` is options.get('vcsContext', '')
 
             actual_sim_root_for_parsing = None 
             base_log_path_for_html = None      
-
             log_path_error = False
+
             if not proj_root_dir:
-                add_output_line_to_job(job_id, "CRITICAL Error: PRJ_ICDIR environment variable is not set. Cannot determine absolute path for rerun logs.")
+                add_output_line_to_job(job_id, "CRITICAL Error: PRJ_ICDIR environment variable is not set for log parsing.")
                 log_path_error = True
             else:
-                if dir_option_value:
-                    vcs_context_basename = os.path.basename(vcs_context) if vcs_context else ""
-                    if not vcs_context_basename:
-                         add_output_line_to_job(job_id, f"Warning: vcsContext is empty or invalid when -dir is specified ('{dir_option_value}'). HTML log paths might be incorrect.")
-                    
-                    actual_sim_root_for_parsing = os.path.join(proj_root_dir, "work", dir_option_value, vcs_context_basename, "sim")
-                    base_log_path_for_html = os.path.join("work", dir_option_value, vcs_context_basename)
-                    add_output_line_to_job(job_id, f"Mode: -dir specified ('{dir_option_value}'). VCS Context for path: '{vcs_context_basename}'.")
+                vcs_context_from_client_for_log_parsing = options.get('vcsContext', '')
+                vcs_context_basename = os.path.basename(vcs_context_from_client_for_log_parsing) if vcs_context_from_client_for_log_parsing else ""
+                
+                if not vcs_context_basename:
+                    current_full_branch_path_for_log_parsing = options.get('branchPath', '')
+                    if current_full_branch_path_for_log_parsing:
+                        vcs_context_basename = os.path.basename(current_full_branch_path_for_log_parsing)
+                        add_output_line_to_job(job_id, f"VCS Context was empty, derived from branchPath ('{current_full_branch_path_for_log_parsing}') as: '{vcs_context_basename}' for log path construction.")
+                    else:
+                        add_output_line_to_job(job_id, "Warning: VCS Context is empty and branchPath is also empty for log path construction. Paths may be incorrect.")
+
+                if final_msim_dir_option: 
+                    actual_sim_root_for_parsing = os.path.join(proj_root_dir, "work", final_msim_dir_option, vcs_context_basename, "sim")
+                    base_log_path_for_html = os.path.join("work", final_msim_dir_option, vcs_context_basename)
+                    add_output_line_to_job(job_id, f"Log parsing paths based on effective msim -dir: '{final_msim_dir_option}', VCS Context: '{vcs_context_basename}'.")
                 else:
+                    add_output_line_to_job(job_id, "Info: MSIM ran without an explicit -dir. Attempting log path construction based on full branch suffix.")
+                    current_full_branch_path_for_log_parsing = options.get('branchPath', '')
                     extracted_branch_suffix = ""
-                    if "work/" in full_branch_path:
-                        extracted_branch_suffix = full_branch_path.split("work/", 1)[1] 
+                    if "work/" in current_full_branch_path_for_log_parsing:
+                        extracted_branch_suffix = current_full_branch_path_for_log_parsing.split("work/", 1)[1] 
                     
                     if not extracted_branch_suffix:
-                        add_output_line_to_job(job_id, f"CRITICAL Error: Could not extract 'work/...' suffix from branchPath: '{full_branch_path}'. Required when -dir is not specified.")
+                        add_output_line_to_job(job_id, f"Error: Cannot determine log paths. 'work/' not in branchPath ('{current_full_branch_path_for_log_parsing}') and msim had no -dir option.")
                         log_path_error = True
                     else:
-                        actual_sim_root_for_parsing = os.path.join(proj_root_dir, extracted_branch_suffix, "sim")
-                        base_log_path_for_html = extracted_branch_suffix 
-                        add_output_line_to_job(job_id, f"Mode: -dir NOT specified. Using branch suffix for paths: '{extracted_branch_suffix}'.")
+                        actual_sim_root_for_parsing = os.path.join(proj_root_dir, "work", extracted_branch_suffix, "sim")
+                        base_log_path_for_html = os.path.join("work", extracted_branch_suffix) 
+                        add_output_line_to_job(job_id, f"Log parsing paths based on branch suffix (msim had no explicit -dir): '{base_log_path_for_html}'.")
 
             if not log_path_error:
-                add_output_line_to_job(job_id, f"  Calculated absolute sim root for parsing: {actual_sim_root_for_parsing}")
-                add_output_line_to_job(job_id, f"  Calculated base relative path for HTML logs: {base_log_path_for_html}")
+                add_output_line_to_job(job_id, f"  Final calculated absolute sim root for parsing: {actual_sim_root_for_parsing}")
+                add_output_line_to_job(job_id, f"  Final calculated base relative path for HTML logs: {base_log_path_for_html}")
 
             if log_path_error or not actual_sim_root_for_parsing or not os.path.isdir(actual_sim_root_for_parsing):
                  warning_msg = f"Rerun sim root directory for parsing ('{actual_sim_root_for_parsing}') is not valid or not found."

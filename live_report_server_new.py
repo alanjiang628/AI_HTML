@@ -9,7 +9,8 @@ import uuid
 import time
 import copy
 import re
-from flask import render_template, request, jsonify, send_from_directory, Blueprint, Flask, CORS
+from flask import render_template, request, jsonify, send_from_directory, Blueprint, Flask
+from flask_cors import CORS # Added CORS import
 # Attempt to import database models and extension, fail gracefully if not available for standalone use
 try:
     from models import Repo
@@ -56,23 +57,45 @@ def add_output_line_to_job(job_id, line):
 
     # --- Live progress parsing ---
     if 'progress_summary' in JOB_STATUS[job_id] and JOB_STATUS[job_id].get('status') == 'running_msim':
+        # Example: UVM_INFO ... [TEST_DONE] Test SimplePingTest_seed123 (PASSED)
         uvm_test_done_pattern = re.compile(r"\[TEST_DONE\]\s*Test\s*([\w_.-]+seed\d+)\s*\((\w+)\)")
         match = uvm_test_done_pattern.search(line)
         if match:
             status_from_log = match.group(2).upper()
             summary = JOB_STATUS[job_id]['progress_summary']
             
+            # This simple increment assumes each TEST_DONE is unique for a test during live parse.
+            # More sophisticated logic might be needed if tests can have multiple TEST_DONE lines or if parsing needs to be idempotent.
+            # We only increment if we haven't processed all selected tests yet.
             if summary['processed_count'] < summary['total_selected']:
                 summary['processed_count'] += 1
                 if status_from_log == "PASSED":
                     summary['passed_count'] += 1
-                elif status_from_log == "FAILED":
+                elif status_from_log == "FAILED": # Or other failure states like UVM_FATAL, etc.
                     summary['failed_count'] += 1
+                # else: status is neither PASSED nor FAILED (e.g. some other UVM status),
+                # it's counted as processed but doesn't change pass/fail counts here.
+                # The final parse_msim_output_for_test_statuses will give definitive status.
+                # print(f"Job {job_id} live progress update: {summary}") # For server-side debugging
     # --- End Live progress parsing ---
 
 def get_job_status(job_id):
     return JOB_STATUS.get(job_id, {"status": "not_found", "message": "Job ID not found.", "output_lines": []})
 # --- End Utility functions ---
+
+def get_project_root_from_branch_path(branch_path, job_id_for_logging=None):
+    """
+    Derives the project root directory (e.g., /path/to/PRJ_ICDIR) from a full branch path.
+    The project root is assumed to be the part of the path before '/work/'.
+    """
+    if not branch_path or '/work/' not in branch_path:
+        if job_id_for_logging:
+            add_output_line_to_job(job_id_for_logging, f"Error: branchPath '{branch_path}' is invalid or does not contain '/work/'. Cannot determine project root.")
+        return None
+    project_root = branch_path.split('/work/', 1)[0]
+    if job_id_for_logging:
+        add_output_line_to_job(job_id_for_logging, f"Derived project root for icenv and HJSON base: {project_root} from branchPath: {branch_path}")
+    return project_root
 
 def _parse_individual_parse_run_log(parse_run_log_path):
     """Helper to parse a single parse_run.log file based on its first line."""
@@ -84,25 +107,34 @@ def _parse_individual_parse_run_log(parse_run_log_path):
             elif 'run.log failed' in first_line or 'run.log is unknown' in first_line:
                 return 'FAILED'
             else:
+                # If parse_run.log exists but content is unexpected for pass/fail
                 return 'UNKNOWN' 
     except FileNotFoundError:
-        return None
+        return None # Indicates parse_run.log was not found
     except Exception as e:
+        # Log an error if parsing fails for an existing file
         print(f"Error parsing log file {parse_run_log_path}: {e}")
-        return 'UNKNOWN'
+        return 'UNKNOWN' # Indicates error during parsing
 
 def find_primary_log_for_rerun(base_search_path):
+    """
+    Searches for run.log or comp.log within the base_search_path.
+    Priority: run.log (common locations, then deep search), then comp.log (common, then deep).
+    Returns the absolute path to the found log file, or None.
+    """
     if not base_search_path or not os.path.isdir(base_search_path):
         print(f"Warning: Base search path for logs is invalid or not a directory: {base_search_path}")
         return None
     log_filenames_priority = ["run.log", "comp.log"]
-    common_subdirs = ["", "latest"]
+    common_subdirs = ["", "latest"] # Check in base_search_path itself, and in base_search_path/latest/
     for log_filename in log_filenames_priority:
+        # Check common locations first
         for subdir in common_subdirs:
             potential_log_path = os.path.join(base_search_path, subdir, log_filename)
             if os.path.exists(potential_log_path):
                 print(f"Found log '{log_filename}' in common location: {os.path.abspath(potential_log_path)}")
                 return os.path.abspath(potential_log_path)
+        # If not in common locations, perform a wider search (os.walk)
         print(f"Log '{log_filename}' not in common locations. Starting deeper search in {base_search_path}...")
         for root, _, files in os.walk(base_search_path):
             if log_filename in files:
@@ -130,22 +162,29 @@ def parse_msim_output_for_test_statuses(msim_stdout, selected_cases_with_seed,
     if job_id_for_logging:
         add_output_line_to_job(job_id_for_logging, f"Starting detailed status parsing. Sim root for parsing: {actual_sim_root_for_parsing}, Base HTML log path: {base_log_path_for_html}")
 
-    if not base_log_path_for_html and actual_sim_root_for_parsing:
+    if not base_log_path_for_html and actual_sim_root_for_parsing: # Should not happen if called correctly
          add_output_line_to_job(job_id_for_logging, "Warning: base_log_path_for_html is missing, HTML log paths might be incorrect.")
+         # Attempt to derive a fallback, this is risky
+         # base_log_path_for_html = os.path.basename(os.path.dirname(actual_sim_root_for_parsing)) # e.g., vcs-context if path is .../vcs-context/sim
 
     for case_id in selected_cases_with_seed:
         current_status = "UNKNOWN"
         error_hint = "Status not determined."
         
         safe_base_html_path = base_log_path_for_html.replace(os.sep, '/') if base_log_path_for_html else "unknown_html_base"
+        # Default HTML log path (fallback if specific case variant dir or log isn't found)
+        # Uses the original case_id and 'latest'. Ensure forward slashes for HTML.
         html_log_path = f"{safe_base_html_path}/sim/{case_id}/latest/run.log" # Default fallback
 
         case_id_variant_dir_name = None
-        individual_test_sim_dir_actual = None 
+        individual_test_sim_dir_actual = None # This will be .../sim/<case_id_variant>/
 
         if actual_sim_root_for_parsing and os.path.isdir(actual_sim_root_for_parsing):
             try:
                 found_match = False
+                # Sort to get a predictable order if multiple startswith matches (e.g. case, case.0, case.1)
+                # Prefer shorter matches if that's a convention, or specific ones like case_id itself first.
+                # For now, simple startswith, first found.
                 dir_items = sorted(os.listdir(actual_sim_root_for_parsing)) 
                 for item_name in dir_items:
                     item_path = os.path.join(actual_sim_root_for_parsing, item_name)
@@ -155,7 +194,7 @@ def parse_msim_output_for_test_statuses(msim_stdout, selected_cases_with_seed,
                         if job_id_for_logging:
                             add_output_line_to_job(job_id_for_logging, f"For {case_id}: Found matching sim directory: {case_id_variant_dir_name} at {individual_test_sim_dir_actual}")
                         found_match = True
-                        break 
+                        break # Take the first match
                 if not found_match and job_id_for_logging:
                      add_output_line_to_job(job_id_for_logging, f"For {case_id}: No directory starting with '{case_id}' found in '{actual_sim_root_for_parsing}'.")
             except Exception as e:
@@ -169,6 +208,8 @@ def parse_msim_output_for_test_statuses(msim_stdout, selected_cases_with_seed,
                         add_output_line_to_job(job_id_for_logging, f"For {case_id} (in {case_id_variant_dir_name}): 'latest' symlink not found. Searching for newest timestamped directory...")
                     subdirs = [d for d in os.listdir(individual_test_sim_dir_actual) if os.path.isdir(os.path.join(individual_test_sim_dir_actual, d))]
                     if subdirs:
+                        # Filter out known non-log dirs if any, e.g. 'waves'
+                        # For now, assume all subdirs are potential log dirs
                         timestamped_subdirs = [os.path.join(individual_test_sim_dir_actual, d) for d in subdirs]
                         if timestamped_subdirs:
                             latest_log_dir = max(timestamped_subdirs, key=os.path.getmtime)
@@ -179,25 +220,37 @@ def parse_msim_output_for_test_statuses(msim_stdout, selected_cases_with_seed,
                 
                 if latest_log_dir and os.path.isdir(latest_log_dir):
                     parse_run_log_path = os.path.join(latest_log_dir, 'parse_run.log')
+                    # actual_run_log_path = os.path.join(latest_log_dir, 'run.log') # For reference
+                    
                     timestamp_or_latest_name = os.path.basename(latest_log_dir)
+                    # Use case_id_variant_dir_name for the HTML path. Ensure forward slashes.
                     html_log_path = f"{safe_base_html_path}/sim/{case_id_variant_dir_name.replace(os.sep, '/')}/{timestamp_or_latest_name.replace(os.sep, '/')}/run.log"
                     
                     if job_id_for_logging: add_output_line_to_job(job_id_for_logging, f"For {case_id} (in {case_id_variant_dir_name}): Checking parse_run.log at {parse_run_log_path}")
                     status_from_parse_log = _parse_individual_parse_run_log(parse_run_log_path)
-                if status_from_parse_log:
-                    current_status = status_from_parse_log
-                    error_hint = "Failed (from parse_run.log)" if current_status == "FAILED" else ("" if current_status == "PASSED" else "Status unclear from parse_run.log")
-                    if job_id_for_logging: add_output_line_to_job(job_id_for_logging, f"For {case_id}: Status from parse_run.log: {current_status}")
-            elif job_id_for_logging: add_output_line_to_job(job_id_for_logging, f"For {case_id}: Individual log directory not found or 'latest' not resolved: {latest_log_dir if latest_log_dir else individual_test_sim_dir}")
+                    if status_from_parse_log: # Check if status_from_parse_log is not None
+                        current_status = status_from_parse_log
+                        error_hint = "Failed (from parse_run.log)" if current_status == "FAILED" else ("" if current_status == "PASSED" else "Status unclear from parse_run.log")
+                        if job_id_for_logging: add_output_line_to_job(job_id_for_logging, f"For {case_id}: Status from parse_run.log: {current_status}")
+                elif job_id_for_logging: # This block executes if latest_log_dir is not valid
+                    add_output_line_to_job(job_id_for_logging, f"For {case_id} (in {case_id_variant_dir_name if case_id_variant_dir_name else 'N/A'}): 'latest' or timestamped log directory not resolved or not a directory: {latest_log_dir}")
+            elif job_id_for_logging and actual_sim_root_for_parsing and os.path.isdir(actual_sim_root_for_parsing):
+                 # This case means individual_test_sim_dir_actual was not found/set
+                 add_output_line_to_job(job_id_for_logging, f"For {case_id}: Could not find or access specific simulation directory for this case variant.")
+        
+        elif job_id_for_logging: # actual_sim_root_for_parsing is None or not a dir
+            add_output_line_to_job(job_id_for_logging, f"For {case_id}: Main sim root for parsing ('{actual_sim_root_for_parsing}') is not valid. Skipping individual log check.")
 
         if current_status == "UNKNOWN":
             if job_id_for_logging: add_output_line_to_job(job_id_for_logging, f"For {case_id}: parse_run.log status is UNKNOWN or file not found. Checking msim_stdout.")
+            # Regex for specific test_id (case_id format is test_base_name_seedSEED)
+            # The [TEST_DONE] log uses the full name including _seedSEED
             uvm_test_done_pattern_specific = re.compile(r"\[TEST_DONE\]\s*Test\s*" + re.escape(case_id) + r"\s*\((\w+)\)")
             for line in msim_stdout.splitlines():
                 match = uvm_test_done_pattern_specific.search(line)
                 if match:
                     status_from_stdout = match.group(1).upper()
-                    current_status = status_from_stdout
+                    current_status = status_from_stdout # Override if found
                     error_hint = "Failed (from [TEST_DONE] in msim stdout)" if status_from_stdout == "FAILED" else ("" if status_from_stdout == "PASSED" else error_hint)
                     if job_id_for_logging: add_output_line_to_job(job_id_for_logging, f"For {case_id}: Status from msim_stdout [TEST_DONE]: {current_status}")
                     break
@@ -206,18 +259,20 @@ def parse_msim_output_for_test_statuses(msim_stdout, selected_cases_with_seed,
         if job_id_for_logging: add_output_line_to_job(job_id_for_logging, f"For {case_id}: Final determined status: {current_status}, Log: {html_log_path}")
     return list(results_map.values())
 
-def prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name):
+def prepare_rerun_hjson_files(project_root_for_hjson, options, temp_rerun_dir, ip_name): # Added project_root_for_hjson
     # This function is from S_latest (and S_old), seems unchanged by S_change's Blueprint modifications directly.
     # It uses job_id_for_logging passed in options, which is good.
     print(f"--- prepare_rerun_hjson_files called for IP: {ip_name} ---")
+    print(f"Using project_root_for_hjson: {project_root_for_hjson}") # New log
     job_id_for_logging = options.get("job_id_for_logging")
-    proj_root_dir = os.environ.get('PRJ_ICDIR')
+    # proj_root_dir = os.environ.get('PRJ_ICDIR') # OLD
+    proj_root_dir = project_root_for_hjson # NEW
     if not proj_root_dir:
-        error_msg = "CRITICAL ERROR: Environment variable PRJ_ICDIR is not set. Cannot locate original HJSON files."
+        error_msg = "CRITICAL ERROR: Project root directory was not provided or derived. Cannot locate original HJSON files." # Updated error
         print(error_msg)
-        if job_id_for_logging: add_output_line_to_job(job_id_for_logging, "Error: PRJ_ICDIR environment variable not set. Configure server environment.")
+        if job_id_for_logging: add_output_line_to_job(job_id_for_logging, "Error: Project root directory not available. Configure server environment or check branchPath.") # Updated error
         return None
-    print(f"Using PRJ_ICDIR from environment: {proj_root_dir}")
+    # print(f"Using PRJ_ICDIR from environment: {proj_root_dir}") # OLD log
     original_hjson_filename = f"{ip_name}.hjson"
     original_hjson_path = os.path.join(proj_root_dir, "dv", "sim_ctrl", "ts", original_hjson_filename)
     print(f"Calculated original HJSON path: {original_hjson_path}")
@@ -321,7 +376,18 @@ def long_running_rerun_task(job_id, options, current_app_logger): # Added curren
     current_app_logger.info(f"--- Starting long_running_rerun_task for job_id: {job_id} ---")
     current_app_logger.info(f"Options received by task: {options}")
     try:
-        options["job_id_for_logging"] = job_id 
+        options["job_id_for_logging"] = job_id
+        
+        # --- Get project_root_for_icenv ---
+        branch_path_for_root_derivation = options.get('branchPath') # This should be the H3 full path
+        project_root_for_icenv = get_project_root_from_branch_path(branch_path_for_root_derivation, job_id)
+
+        if not project_root_for_icenv:
+            # get_project_root_from_branch_path already logs the error to job status
+            update_job_status(job_id, "failed", "Failed to derive project root from branchPath. Cannot proceed.")
+            return
+        # --- End Get project_root_for_icenv ---
+
         num_selected_cases = len(options.get('selectedCases', []))
         JOB_STATUS[job_id]['progress_summary'] = {"total_selected": num_selected_cases, "processed_count": 0, "passed_count": 0, "failed_count": 0}
         update_job_status(job_id, "preparing_hjson", "Preparing HJSON files...")
@@ -335,28 +401,42 @@ def long_running_rerun_task(job_id, options, current_app_logger): # Added curren
             update_job_status(job_id, "failed", f"Failed to create temp directory: {e}")
             add_output_line_to_job(job_id, f"Error: Failed to create temporary directory {temp_rerun_dir}: {e}")
             return
-        branch_path = options.get('branchPath')
-        if not branch_path: # branchPath is expected from client, e.g. "ip_name-vcs" or similar
-            update_job_status(job_id, "failed", "Branch path (vcsContext) not provided by client.")
-            add_output_line_to_job(job_id, "Error: Branch path (vcsContext) is missing. Cannot determine IP for HJSON.")
+        
+        # branch_path here is used for IP name derivation, might be different from the one for root derivation
+        # Client sends 'branchPath' which is vcsContext (e.g., "ip_name-vcs") for IP derivation
+        # And also sends 'fullH3BranchPath' (not currently used by this script, but was used by live_report_server.py for root)
+        # For now, assume options.get('branchPath') is the vcsContext for IP derivation.
+        # The root derivation uses options.get('branchPath') which should be the H3 full path.
+        # This needs clarification if client sends two different branchPath fields.
+        # Assuming 'branchPath' in options is the one for IP derivation (e.g., "mtu-vcs")
+        # And the one used for get_project_root_from_branch_path was also options.get('branchPath')
+        # This implies options.get('branchPath') must be the H3 full path.
+        
+        ip_derivation_path = options.get('branchPath') # This is the H3 full path, used for IP name too.
+        if not ip_derivation_path: 
+            update_job_status(job_id, "failed", "Branch path (for IP derivation) not provided by client.")
+            add_output_line_to_job(job_id, "Error: Branch path (for IP derivation) is missing. Cannot determine IP for HJSON.")
             return
-        add_output_line_to_job(job_id, f"Received branch path for IP context: {branch_path}")
+        add_output_line_to_job(job_id, f"Received branch path for IP context: {ip_derivation_path}")
+        
         derived_ip_name = None
-        try: # Assuming branch_path is like "ip_name-vcs" or "ip_name"
-            ip_folder_name = os.path.basename(branch_path) 
+        try: 
+            # Assuming ip_derivation_path is the H3 full path like /gsa/pokgsa/projects/m/mtu_proj/work/user_a/mtu-vcs
+            # We need the basename, e.g., "mtu-vcs", then "mtu"
+            ip_folder_name = os.path.basename(ip_derivation_path) 
             derived_ip_name = ip_folder_name.split('-', 1)[0]
             if not derived_ip_name: raise ValueError("Derived IP name is empty.")
         except Exception as e:
-            update_job_status(job_id, "failed", f"Failed to derive IP name from branch path: {branch_path}. Error: {e}")
-            add_output_line_to_job(job_id, f"Error: Could not derive IP name from branch path '{branch_path}': {e}")
+            update_job_status(job_id, "failed", f"Failed to derive IP name from branch path: {ip_derivation_path}. Error: {e}")
+            add_output_line_to_job(job_id, f"Error: Could not derive IP name from branch path '{ip_derivation_path}': {e}")
             return
         add_output_line_to_job(job_id, f"Derived IP name for HJSON context: {derived_ip_name}")
         ip_names_to_process = {derived_ip_name}
         generated_hjson_paths_map = {}
         all_hjson_prepared_successfully = True
         for ip_name in ip_names_to_process:
-            add_output_line_to_job(job_id, f"Processing IP: {ip_name} for HJSON preparation.")
-            hjson_path = prepare_rerun_hjson_files(options, temp_rerun_dir, ip_name)
+            add_output_line_to_job(job_id, f"Processing IP: {ip_name} for HJSON preparation using project root: {project_root_for_icenv}")
+            hjson_path = prepare_rerun_hjson_files(project_root_for_icenv, options, temp_rerun_dir, ip_name) # Pass project_root_for_icenv
             if hjson_path:
                 generated_hjson_paths_map[ip_name] = hjson_path
                 add_output_line_to_job(job_id, f"Successfully prepared HJSON for {ip_name} at {hjson_path}")
@@ -414,47 +494,80 @@ def long_running_rerun_task(job_id, options, current_app_logger): # Added curren
         if vlogan_opts_value: msim_command_parts.extend(["-vlog", vlogan_opts_value]); add_output_line_to_job(job_id, f"Adding -vlog \"{vlogan_opts_value}\"")
         run_opts_value = options.get('runOpts', '').strip()
         if run_opts_value: msim_command_parts.extend(["-ro", run_opts_value]); add_output_line_to_job(job_id, f"Adding -ro \"{run_opts_value}\"")
-        msim_full_command = " ".join(msim_command_parts)
-        add_output_line_to_job(job_id, f"Constructed msim command: {msim_full_command}")
-        update_job_status(job_id, "running_msim", "Executing MSIM command...", command=msim_full_command)
-        add_output_line_to_job(job_id, "Executing MSIM. This may take some time...")
+        
+        msim_executable_and_args = " ".join(msim_command_parts) # This is the actual msim command and its arguments
+        icenv_script_path = "/remote/public/scripts/icenv.csh" # Standard path for icenv.csh
+        
+        # Construct the shell command to source .cshrc, then icenv.csh, then run msim
+        shell_exec_command = f"source ~/.cshrc && {icenv_script_path} && {msim_executable_and_args}"
+        
+        update_job_status(job_id, "running_msim", "Executing MSIM command (sourcing ~/.cshrc, then icenv.csh, with full env inherit)...", command=f"cd '{project_root_for_icenv}' && {shell_exec_command}") # Log original intent
+        add_output_line_to_job(job_id, f"Setting CWD for subprocess to: {project_root_for_icenv}") # project_root_for_icenv was derived earlier
+        add_output_line_to_job(job_id, f"Executing shell command (within CWD): {shell_exec_command}")
+        add_output_line_to_job(job_id, "This may take some time...")
+        
         try:
-            process = subprocess.Popen(msim_command_parts, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, universal_newlines=True)
+            # Using inherited environment from the parent (Python script).
+            add_output_line_to_job(job_id, "Using inherited environment for subprocess.")
+            add_output_line_to_job(job_id, f"Attempting to execute shell command with tcsh. Ensure 'tcsh' is in the inherited PATH.")
+            
+            process = subprocess.Popen(shell_exec_command, 
+                                     stdout=subprocess.PIPE, 
+                                     stderr=subprocess.PIPE, 
+                                     text=True, 
+                                     bufsize=1, 
+                                     universal_newlines=True, 
+                                     shell=True, 
+                                     executable='tcsh',
+                                     cwd=project_root_for_icenv) # env is inherited, cwd is set
+            
             if process.stdout:
-                for line in iter(process.stdout.readline, ''): print(line, end=''); add_output_line_to_job(job_id, line.strip())
+                for line in iter(process.stdout.readline, ''): 
+                    print(line, end='') # Keep server console log if needed
+                    add_output_line_to_job(job_id, line.strip())
                 process.stdout.close()
+            
             return_code = process.wait()
-            stderr_output = process.stderr.read() if process.stderr else ""
-            if process.stderr: process.stderr.close()
-            if stderr_output:
-                add_output_line_to_job(job_id, "MSIM Stderr:")
-                for line_err in stderr_output.splitlines(): add_output_line_to_job(job_id, line_err.strip())
+            
+            stderr_output = ""
+            if process.stderr:
+                stderr_output = process.stderr.read()
+                process.stderr.close()
+                if stderr_output:
+                    add_output_line_to_job(job_id, "Shell Stderr (includes msim stderr):") # Updated label
+                    for line_err in stderr_output.splitlines(): 
+                        add_output_line_to_job(job_id, line_err.strip())
+            
             final_status_key = "completed" if return_code == 0 else "failed"
-            final_status_message = "MSIM run completed successfully." if return_code == 0 else f"MSIM run failed with return code {return_code}."
+            final_status_message = "MSIM run (via shell with icenv) completed successfully." if return_code == 0 else f"MSIM run (via shell with icenv) failed with return code {return_code}." # Updated message
             update_job_status(job_id, final_status_key, final_status_message, returncode=return_code, stderr=stderr_output if return_code != 0 else None)
             add_output_line_to_job(job_id, final_status_message)
-            full_msim_stdout = "\n".join(JOB_STATUS[job_id].get("output_lines", []))
+            full_msim_stdout = "\n".join(JOB_STATUS[job_id].get("output_lines", [])) # This now contains output from tcsh, icenv, and msim
             
             # Determine paths for log parsing and HTML links
             # This uses `final_msim_dir_option` (determined before msim command) and `vcs_context` from client.
-            proj_root_dir = os.environ.get('PRJ_ICDIR')
-            # `final_msim_dir_option` is the one ACTUALLY passed to `msim -dir`
-            # `full_branch_path_for_log_parsing` is options.get('branchPath', '')
-            # `vcs_context_from_client_for_log_parsing` is options.get('vcsContext', '')
+            # proj_root_dir = os.environ.get('PRJ_ICDIR') # OLD
+            # Use project_root_for_icenv derived earlier
+            proj_root_dir_for_logs = project_root_for_icenv 
 
             actual_sim_root_for_parsing = None 
             base_log_path_for_html = None      
             log_path_error = False
 
-            if not proj_root_dir:
-                add_output_line_to_job(job_id, "CRITICAL Error: PRJ_ICDIR environment variable is not set for log parsing.")
+            if not proj_root_dir_for_logs: # Check the derived project root
+                add_output_line_to_job(job_id, "CRITICAL Error: Project root (derived from branchPath) is not available for log parsing.")
                 log_path_error = True
             else:
-                vcs_context_from_client_for_log_parsing = options.get('vcsContext', '')
+                # Determine vcs_context_basename (e.g., "mtu-vcs")
+                # options.get('branchPath') is assumed to be the H3 full path.
+                # options.get('vcsContext') might be a shorter version like "mtu-vcs" from client.
+                # Prefer vcsContext if available and seems valid, otherwise derive from branchPath.
+                vcs_context_from_client_for_log_parsing = options.get('vcsContext', '') # This is what live_report_server.py uses
                 vcs_context_basename = os.path.basename(vcs_context_from_client_for_log_parsing) if vcs_context_from_client_for_log_parsing else ""
                 
                 if not vcs_context_basename:
-                    current_full_branch_path_for_log_parsing = options.get('branchPath', '')
+                    # Fallback: try to derive from full_branch_path if vcsContext option was empty
+                    current_full_branch_path_for_log_parsing = options.get('branchPath', '') # H3 full path
                     if current_full_branch_path_for_log_parsing:
                         vcs_context_basename = os.path.basename(current_full_branch_path_for_log_parsing)
                         add_output_line_to_job(job_id, f"VCS Context was empty, derived from branchPath ('{current_full_branch_path_for_log_parsing}') as: '{vcs_context_basename}' for log path construction.")
@@ -462,21 +575,26 @@ def long_running_rerun_task(job_id, options, current_app_logger): # Added curren
                         add_output_line_to_job(job_id, "Warning: VCS Context is empty and branchPath is also empty for log path construction. Paths may be incorrect.")
 
                 if final_msim_dir_option: 
-                    actual_sim_root_for_parsing = os.path.join(proj_root_dir, "work", final_msim_dir_option, vcs_context_basename, "sim")
+                    # This is the primary case: msim ran with an explicit -dir (user-specified or derived)
+                    actual_sim_root_for_parsing = os.path.join(proj_root_dir_for_logs, "work", final_msim_dir_option, vcs_context_basename, "sim")
                     base_log_path_for_html = os.path.join("work", final_msim_dir_option, vcs_context_basename)
                     add_output_line_to_job(job_id, f"Log parsing paths based on effective msim -dir: '{final_msim_dir_option}', VCS Context: '{vcs_context_basename}'.")
                 else:
+                    # Fallback: msim ran without -dir (e.g., derivation failed AND user didn't provide one)
                     add_output_line_to_job(job_id, "Info: MSIM ran without an explicit -dir. Attempting log path construction based on full branch suffix.")
-                    current_full_branch_path_for_log_parsing = options.get('branchPath', '')
+                    current_full_branch_path_for_log_parsing = options.get('branchPath', '') # H3 full path
                     extracted_branch_suffix = ""
                     if "work/" in current_full_branch_path_for_log_parsing:
+                        # This suffix is like "msim_report_v3p0_2/mtu-vcs"
                         extracted_branch_suffix = current_full_branch_path_for_log_parsing.split("work/", 1)[1] 
                     
                     if not extracted_branch_suffix:
                         add_output_line_to_job(job_id, f"Error: Cannot determine log paths. 'work/' not in branchPath ('{current_full_branch_path_for_log_parsing}') and msim had no -dir option.")
                         log_path_error = True
                     else:
-                        actual_sim_root_for_parsing = os.path.join(proj_root_dir, "work", extracted_branch_suffix, "sim")
+                        # Path construction: $PRJ_ICDIR/work/{extracted_branch_suffix}/sim/
+                        # HTML base: work/{extracted_branch_suffix}
+                        actual_sim_root_for_parsing = os.path.join(proj_root_dir_for_logs, "work", extracted_branch_suffix, "sim")
                         base_log_path_for_html = os.path.join("work", extracted_branch_suffix) 
                         add_output_line_to_job(job_id, f"Log parsing paths based on branch suffix (msim had no explicit -dir): '{base_log_path_for_html}'.")
 
@@ -489,7 +607,7 @@ def long_running_rerun_task(job_id, options, current_app_logger): # Added curren
                  if log_path_error and not actual_sim_root_for_parsing : warning_msg = "Critical error in path calculation prevented log search."
                  add_output_line_to_job(job_id, f"Warning: {warning_msg} Detailed status update will be limited to MSIM stdout.")
                  detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout, options.get('selectedCases', []),
-                                                                    None, None, job_id) 
+                                                                    None, None, job_id) # Pass None for paths
             else:
                 detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout, options.get('selectedCases', []),
                                                                     actual_sim_root_for_parsing,
@@ -497,12 +615,33 @@ def long_running_rerun_task(job_id, options, current_app_logger): # Added curren
                                                                     job_id)
             JOB_STATUS[job_id]['detailed_test_results'] = detailed_results
             add_output_line_to_job(job_id, f"Final detailed test results: {detailed_results}")
-        except FileNotFoundError:
-            update_job_status(job_id, "failed", "MSIM command not found. Ensure msim is in PATH.")
-            add_output_line_to_job(job_id, "Error: MSIM command not found. Please check system PATH or msim setup.")
+
+            # Attempt to find a primary log for the whole rerun, if paths are valid
+            if not log_path_error and proj_root_dir_for_logs and final_msim_dir_option and vcs_context_basename:
+                rerun_output_base_abs = os.path.join(proj_root_dir_for_logs, "work", final_msim_dir_option, vcs_context_basename)
+                add_output_line_to_job(job_id, f"Searching for primary msim log (run.log/comp.log) in: {rerun_output_base_abs}")
+                primary_log_file = find_primary_log_for_rerun(rerun_output_base_abs)
+                if primary_log_file:
+                    add_output_line_to_job(job_id, f"Primary msim log file found: {primary_log_file}")
+                else:
+                    add_output_line_to_job(job_id, f"Warning: Primary msim log file (run.log/comp.log) not found in {rerun_output_base_abs}")
+            elif not log_path_error and proj_root_dir_for_logs and base_log_path_for_html and not final_msim_dir_option : # Fallback case using extracted_branch_suffix
+                # base_log_path_for_html would be "work/extracted_branch_suffix"
+                rerun_output_base_abs_fallback = os.path.join(proj_root_dir_for_logs, base_log_path_for_html)
+                add_output_line_to_job(job_id, f"Searching for primary msim log (run.log/comp.log) in fallback path: {rerun_output_base_abs_fallback}")
+                primary_log_file_fallback = find_primary_log_for_rerun(rerun_output_base_abs_fallback)
+                if primary_log_file_fallback:
+                    add_output_line_to_job(job_id, f"Primary msim log file found (fallback): {primary_log_file_fallback}")
+                else:
+                    add_output_line_to_job(job_id, f"Warning: Primary msim log file (run.log/comp.log) not found in fallback path {rerun_output_base_abs_fallback}")
+
+
+        except FileNotFoundError: # This would be if tcsh is not found, or msim/icenv within the shell
+            update_job_status(job_id, "failed", "Shell (tcsh) or core command (msim/icenv) not found. Ensure tcsh, icenv, and msim are accessible.") # Updated message
+            add_output_line_to_job(job_id, "Error: Shell (tcsh) or essential command (msim/icenv) not found. Check PATH and icenv setup.") # Updated message
         except Exception as e:
-            update_job_status(job_id, "failed", f"An error occurred during MSIM execution: {e}")
-            add_output_line_to_job(job_id, f"Error during MSIM execution: {str(e)}")
+            update_job_status(job_id, "failed", f"An error occurred during shell (msim with icenv) execution: {e}") # Updated message
+            add_output_line_to_job(job_id, f"Error during shell (msim with icenv) execution: {str(e)}") # Updated message
     except Exception as e: 
         current_app_logger.error(f"CRITICAL ERROR IN TASK {job_id}: {str(e)}", exc_info=True) 
         update_job_status(job_id, "failed", f"Critical error in task: {str(e)}")
@@ -585,7 +724,7 @@ if __name__ == '__main__':
              request.getBluePrintAppLogger = lambda: app.logger
 
     app.register_blueprint(bp) # Register blueprint without a URL prefix
-    CORS(app) # Apply CORS to the main app
+    CORS(app) # Apply CORS to the main app for standalone running
 
     print("Server starting (merged version). Ensure PRJ_ICDIR environment variable is set for reruns.")
     print(f"Script directory (location of this .py file): {script_dir}") # AI_HTML

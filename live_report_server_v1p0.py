@@ -358,43 +358,38 @@ def long_running_rerun_task(job_id, options, current_app_logger, actual_flask_ap
 
             project_root_for_icenv = None
             branch_path_from_options = options.get('branchPath')
-            db_project_base_path_from_options = options.get('db_project_base_path')
-            logger_to_use_start.info(f"Job {job_id}: Attempting to determine project root. Client branchPath: '{branch_path_from_options}', DB base_path: '{db_project_base_path_from_options}'.")
+            
+            logger_to_use_start.info(f"Job {job_id}: Attempting to determine project root solely from client-provided 'branchPath': '{branch_path_from_options}'.")
 
-            # Priority 1: Derive from branchPath if it's valid and contains '/work/'
-            if branch_path_from_options and '/work/' in branch_path_from_options:
+            if branch_path_from_options and isinstance(branch_path_from_options, str) and '/work/' in branch_path_from_options:
                 project_root_for_icenv = get_project_root_from_branch_path(branch_path_from_options, job_id)
                 if project_root_for_icenv:
-                    add_output_line_to_job(job_id, f"Using project root derived from client 'branchPath' ({branch_path_from_options}): {project_root_for_icenv}")
-                    logger_to_use_start.info(f"Job {job_id}: Prioritized project_root_for_icenv from client branchPath: {project_root_for_icenv}")
+                    add_output_line_to_job(job_id, f"Successfully derived project root from client 'branchPath' ('{branch_path_from_options}'): {project_root_for_icenv}")
+                    logger_to_use_start.info(f"Job {job_id}: Successfully derived project_root_for_icenv from client 'branchPath': {project_root_for_icenv}")
                 else:
-                    add_output_line_to_job(job_id, f"Warning: Failed to derive project root from client 'branchPath' ({branch_path_from_options}) even though '/work/' was present. Will check DB path.")
-                    logger_to_use_start.warning(f"Job {job_id}: Failed to derive project_root_for_icenv from client branchPath ('{branch_path_from_options}') despite '/work/' presence. Checking DB path.")
+                    # This case (get_project_root_from_branch_path returns None despite valid-looking input) should be rare.
+                    project_root_for_icenv = None # Explicitly set to None
+                    error_msg = f"Error: Failed to derive project root from 'branchPath' ('{branch_path_from_options}') even though it appeared valid. Ensure the path structure is correct."
+                    add_output_line_to_job(job_id, error_msg)
+                    logger_to_use_start.error(f"Job {job_id}: {error_msg}")
             else:
-                if branch_path_from_options:
-                     add_output_line_to_job(job_id, f"Client 'branchPath' ({branch_path_from_options}) does not contain '/work/' or is invalid. Will check DB path.")
-                     logger_to_use_start.info(f"Job {job_id}: Client 'branchPath' ('{branch_path_from_options}') unsuitable for derivation. Checking DB path.")
-                else:
-                     add_output_line_to_job(job_id, "Client 'branchPath' not provided. Will check DB path.")
-                     logger_to_use_start.info(f"Job {job_id}: Client 'branchPath' not provided. Checking DB path.")
+                error_msg = ""
+                if not branch_path_from_options or not isinstance(branch_path_from_options, str):
+                    error_msg = "Error: 'branchPath' was not provided by the client or is not a string."
+                elif '/work/' not in branch_path_from_options:
+                    error_msg = f"Error: Provided 'branchPath' ('{branch_path_from_options}') is invalid as it does not contain '/work/'."
+                
+                add_output_line_to_job(job_id, error_msg)
+                logger_to_use_start.error(f"Job {job_id}: {error_msg}")
+                # project_root_for_icenv remains None
 
-
-            # Priority 2: Use db_project_base_path if derivation from branchPath failed or branchPath was unsuitable
+            # If project_root_for_icenv could not be determined, fail the job.
             if not project_root_for_icenv:
-                if db_project_base_path_from_options:
-                    project_root_for_icenv = db_project_base_path_from_options
-                    add_output_line_to_job(job_id, f"Using project root from database ('db_project_base_path') as fallback: {project_root_for_icenv}")
-                    logger_to_use_start.info(f"Job {job_id}: Using project_root_for_icenv from DB ('db_project_base_path') as fallback: {project_root_for_icenv}")
-                else:
-                    add_output_line_to_job(job_id, "Error: Client 'branchPath' was unsuitable for derivation, and 'db_project_base_path' was not available.")
-                    logger_to_use_start.error(f"Job {job_id}: Client 'branchPath' unsuitable and 'db_project_base_path' (Repo.data_path) missing for project root determination.")
-
-            if not project_root_for_icenv: # If still no root after all attempts
-                update_job_status(job_id, "failed", "Critical: Failed to determine project root from any source (branchPath or DB). Cannot proceed.")
-                logger_to_use_start.error(f"Job {job_id}: Failed to determine project_root_for_icenv from any source. Aborting task.")
+                update_job_status(job_id, "failed", "Critical: Failed to determine project root. A valid 'branchPath' (string containing '/work/') must be provided by the client in the request options.")
+                # Specific error logged above, no need for redundant logger_to_use_start.error here.
                 return
-
-            # Log the final determined project root
+            
+            # Log the final determined project root (this line was already present and is correct)
             logger_to_use_start.info(f"Job {job_id}: Successfully determined final project_root_for_icenv: {project_root_for_icenv}")
 
             num_selected_cases = len(options.get('selectedCases', []))
@@ -466,10 +461,28 @@ def long_running_rerun_task(job_id, options, current_app_logger, actual_flask_ap
             msim_executable_and_args = " ".join(msim_command_parts)
             icenv_script_path = "/remote/public/scripts/icenv.csh"
             module_load_command = "module load msim/v3p0"
-            shell_exec_command = f"source ~/.cshrc && {icenv_script_path} && {module_load_command} && {msim_executable_and_args}"
-
-            update_job_status(job_id, "running_msim", "Executing MSIM command...", command=f"cd '{project_root_for_icenv}' && {shell_exec_command}")
-            add_output_line_to_job(job_id, f"Executing shell command (within CWD {project_root_for_icenv}): {shell_exec_command}")
+            # Corrected: git_pull_dir is project_root_for_icenv
+            git_pull_dir = project_root_for_icenv 
+            
+            # Sequence: icenv setup, module load, cd to project_root_for_icenv (which is git_pull_dir), git pull, then msim
+            # Note: The Popen cwd is already project_root_for_icenv.
+            # So, the 'cd {git_pull_dir}' is only strictly necessary if project_root_for_icenv could somehow be different
+            # from the Popen cwd, or for explicit clarity. Given Popen's cwd IS project_root_for_icenv,
+            # The Popen cwd is already project_root_for_icenv (which is git_pull_dir).
+            # So, an explicit 'cd {git_pull_dir}' inside the shell command is redundant.
+            shell_exec_command = (
+                f"source ~/.cshrc && "
+                f"{icenv_script_path} && "
+                f"{module_load_command} && "
+                # f"cd {git_pull_dir} && "  # Removed redundant cd
+                f"git pull && "
+                f"{msim_executable_and_args}"
+            )
+            
+            # The Popen cwd is project_root_for_icenv (git_pull_dir).
+            update_job_status(job_id, "running_msim", f"Pulling latest changes in {git_pull_dir} and executing MSIM command...", 
+                              command=f"git pull && {msim_executable_and_args} (executed in {git_pull_dir} after icenv setup)")
+            add_output_line_to_job(job_id, f"Executing shell command (CWD for shell, git pull, and msim: {git_pull_dir}): {shell_exec_command}")
             add_output_line_to_job(job_id, "This may take some time...")
 
             process_return_code = None # Initialize here
@@ -556,9 +569,19 @@ def long_running_rerun_task(job_id, options, current_app_logger, actual_flask_ap
             add_output_line_to_job(job_id, f"Final detailed test results: {detailed_results}")
 
             if detailed_results and (JOB_STATUS[job_id]['status'] == "completed" or JOB_STATUS[job_id]['status'] == "failed"):
-                original_dir_from_client = options.get('actualWorkDirFromFilePath')
-                if project_root_for_icenv and original_dir_from_client and derived_ip_name:
-                    update_html_report_on_disk(None, detailed_results, job_id, project_root_for_icenv, original_dir_from_client, derived_ip_name, logger_to_use_start)
+                html_report_actual_path_from_options = options.get('html_report_actual_path')
+                if html_report_actual_path_from_options:
+                    add_output_line_to_job(job_id, f"Attempting to update HTML report on disk at: {html_report_actual_path_from_options}")
+                    update_html_report_on_disk(html_report_actual_path_from_options, detailed_results, job_id, project_root_for_icenv, None, derived_ip_name, logger_to_use_start)
+                else:
+                    # Fallback to old method if path not in options (though ideally it should always be)
+                    add_output_line_to_job(job_id, "Warning: 'html_report_actual_path' not found in options. Falling back to constructing HTML report path for update.")
+                    original_dir_from_client = options.get('actualWorkDirFromFilePath')
+                    if project_root_for_icenv and original_dir_from_client and derived_ip_name:
+                        update_html_report_on_disk(None, detailed_results, job_id, project_root_for_icenv, original_dir_from_client, derived_ip_name, logger_to_use_start)
+                    else:
+                        add_output_line_to_job(job_id, "Error: Could not update HTML report on disk due to missing parameters for path construction (fallback).")
+                        logger_to_use_start.error(f"Job {job_id}: Failed to update HTML report on disk (fallback) - missing project_root, original_dir, or ip_name.")
 
             # ... (find_primary_log_for_rerun calls) ...
             if not log_path_error and proj_root_dir_for_logs and final_msim_dir_option and vcs_context_basename:
@@ -693,12 +716,43 @@ def rerun_cases(repo_id):
         project_base_path_from_db = None
         if Repo and db:
             repo_obj = Repo.query.get(repo_id)
-            if repo_obj: project_base_path_from_db = getattr(repo_obj, 'data_path', None)
-        data = request.get_json()
-        if not data or 'selectedCases' not in data:
-            return jsonify({"status": "error", "message": "Invalid request"}), 400
-        data['url_repo_id'] = repo_id
-        if project_base_path_from_db: data['db_project_base_path'] = project_base_path_from_db
+            if repo_obj:
+                project_base_path_from_db = getattr(repo_obj, 'data_path', None)
+                # Extract the actual HTML report path from the latest test record
+                if repo_obj.test_records and isinstance(repo_obj.test_records, list) and len(repo_obj.test_records) > 0:
+                    latest_record = repo_obj.test_records[0]
+                    html_report_path_from_db = latest_record.get('rpt')
+                    if html_report_path_from_db and os.path.exists(html_report_path_from_db):
+                        # Add this path to the data to be passed to the thread
+                        data = request.get_json() # Get data first
+                        if not data: data = {} # Ensure data is a dict
+                        data['html_report_actual_path'] = html_report_path_from_db
+                        current_op_logger.info(f"Extracted actual HTML report path for update: {html_report_path_from_db}")
+                    else:
+                        # Path not found in DB or doesn't exist, log warning, proceed without it
+                        # The fallback in long_running_rerun_task will be used.
+                        data = request.get_json() # Still need to get data
+                        if not data: data = {}
+                        current_op_logger.warning(f"Could not get valid 'rpt' path from DB for repo {repo_id} for HTML update.")
+                else: # No test records
+                    data = request.get_json()
+                    if not data: data = {}
+                    current_op_logger.warning(f"No test records found for repo {repo_id} to determine HTML report path for update.")
+            else: # Repo object not found
+                data = request.get_json()
+                if not data: data = {}
+                current_op_logger.warning(f"Repo object not found for id {repo_id}.")
+        else: # Repo or db not available
+            data = request.get_json()
+            if not data: data = {}
+            current_op_logger.warning("Database (Repo/db) not available. Cannot fetch HTML report path from DB.")
+
+        if not data or 'selectedCases' not in data: # data might have been initialized to {}
+            return jsonify({"status": "error", "message": "Invalid request or missing selectedCases"}), 400
+        
+        data['url_repo_id'] = repo_id # Ensure repo_id is in data
+        if project_base_path_from_db: # This might be None if repo_obj was not found
+            data['db_project_base_path'] = project_base_path_from_db
 
         passed_app_instance = current_app._get_current_object() # Get the actual app instance
         print(f"[DEBUG_PRINT] rerun_cases for repo_id: {repo_id} - Passing app instance to thread: {passed_app_instance}")
@@ -780,4 +834,3 @@ if __name__ == '__main__':
     CORS(app)
     print("Server starting (standalone blueprint mode)...")
     app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)
-

@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>FCCU Simulation Results</title>
+<style type="text/css">
+    /* /* Copyright lowRISC contributors. */
+/* Licensed under the Apache License, Version 2.0, see LICENSE for details. */
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/* CSS for reports.opentitan.org.
+ * This is referenced by all results published to the reports server for some basic styling.
+ */
+
+/* CSS 规则专门用于 Rerun Console */
+
+.rerun-console {
+  border: 1px solid #ccc;       /* 边框 */
+  padding: 15px;                /* 内边距 */
+  margin-bottom: 20px;          /* 下外边距 */
+  background-color: #f9f9f9;    /* 背景色 */
+}
+
+.rerun-console h2 {
+  text-align: left;             /* 标题左对齐 */
+  margin-top: 0;                /* 上外边距为0 */
+  padding-bottom: 10px;         /* 下内边距 */
+  border-bottom: 1px solid #eee; /* 底部边框作为分隔线 */
+}
+
+.console-grid {
+  display: grid;                                             /* 使用 Grid 布局 */
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); /* 响应式列布局：列宽最小250px，自动填充可用空间 */
+  gap: 15px;                                                 /* 网格项之间的间隙 */
+}
+
+.console-item {
+  display: flex;                /* 使用 Flex 布局，使其子元素（label, input）垂直排列 */
+  flex-direction: column;       /* Flex 子元素垂直方向排列 */
+}
+
+.console-item label {
+  margin-bottom: 5px;           /* Label 下方间距 */
+  font-weight: bold;            /* Label 字体加粗 */
+}
+
+/* 针对 Rerun Console 内的特定 input 类型 */
+.console-item input[type="text"],
+.console-item input[type="number"] {
+  padding: 8px;                 /* 输入框内边距 */
+  border: 1px solid #ccc;       /* 输入框边框 */
+  border-radius: 4px;           /* 输入框边框圆角 */
+  /* 可以在这里添加 width: 100%; 使输入框充满 .console-item 的宽度，如果需要的话 */
+}
+
+.console-item input[type="checkbox"] {
+  margin-right: 5px;            /* 复选框右侧间距 (使其与后面的 Label 文字有间隔) */
+  /* vertical-align: middle; 可选，用于垂直对齐，但 flex 布局下可能不需要 */
+}
+
+.button-bar {
+  margin-top: 15px;             /* 按钮组上方间距 */
+  text-align: right;            /* 按钮右对齐 */
+}
+
+.button-bar button {
+  padding: 10px 15px;           /* 按钮内边距 */
+  background-color: #007bff;    /* 按钮背景色 (Bootstrap 主题蓝) */
+  color: white;                 /* 按钮文字颜色 */
+  border: none;                 /* 无边框 */
+  cursor: pointer;              /* 鼠标指针样式为手型 */
+  border-radius: 4px;           /* 按钮边框圆角 */
+  margin-left: 10px;            /* 按钮左侧间距 (多个按钮时区隔) */
+}
+
+.button-bar button:hover {
+  background-color: #0056b3;    /* 按钮鼠标悬浮时背景色变深 */
+}
+
+/* 确保这些通用输入框样式不会意外影响其他地方的输入框，
+ 如果 dvsim 的原始 style.css 中有更通用的 input 样式，可能需要调整选择器的特异性。
+ 但由于这些规则都以 .console-item 开头，它们的作用域已经被限定在 Rerun Console 内部。
+*/
+
+
+
+.results {
+  width: 80%;
+  max-width: 960px;
+  padding-left: 40px;
+  padding-right: 40px;
+  margin: 0 auto;
+  position: relative;
+  font-family: "Trebuchet MS", Arial, Helvetica, sans-serif;
+  padding-top: 15px;
+}
+
+.results p {
+  text-align: justify;
+}
+
+.results pre {
+   overflow-x: auto;
+   white-space: pre-wrap;
+}
+
+.results h1, .results h2, .results h3 {
+  text-align: center;
+  padding-bottom: 15px;
+}
+
+.results table {
+  width: 90%;
+  margin: 2% auto;
+  border: 1px solid #f2f2f2;
+  border-collapse: collapse;
+  text-align: center;
+  vertical-align: middle;
+  display: table;
+  table-layout: auto;
+}
+
+.results th {
+  padding-top: 12px;
+  padding-bottom: 12px;
+  background-color: #3D1067;
+  text-transform: uppercase;
+  color: white;
+}
+
+.results th, .results td {
+  border: 1px solid #f2f2f2;
+  padding: 8px;
+}
+
+.results tr:hover {
+  background-color: #f2f2f2;
+}
+
+.results tbody tr:nth-child(even) {
+  background: #f2f2f2;
+}
+
+/* Color encoding for percentages. */
+.cna  {
+  color: #000000;
+  background-color: #f8f8f8;
+}
+
+.c0  {
+  color: #ffffff;
+  background-color: #EF5757;
+}
+
+.c1  {
+  color: #ffffff;
+  background-color: #EF6D57;
+}
+
+.c2  {
+  color: #000000;
+  background-color: #EF8357;
+}
+
+.c3  {
+  color: #000000;
+  background-color: #EF9957;
+}
+
+.c4  {
+  color: #000000;
+  background-color: #EFAF57;
+}
+
+.c5  {
+  color: #000000;
+  background-color: #EFC557;
+}
+
+.c6  {
+  color: #000000;
+  background-color: #EFDB57;
+}
+
+.c7  {
+  color: #000000;
+  background-color: #ECEF57;
+}
+
+.c8  {
+  color: #000000;
+  background-color: #D6EF57;
+}
+
+.c9  {
+  color: #000000;
+  background-color: #C0EF57;
+}
+
+.c10  {
+  color: #000000;
+  background-color: #57EF57;
+}
+ */
+    /* 这里的 CSS 内容将由 Python 脚本在运行时填充 */
+    /* 或者，如果您更喜欢外部链接并且 CSS 文件位置固定，可以使用：
+       <link rel="stylesheet" href="path/to/your/styles.css">
+       但请注意，如果 HTML 是独立分发的，嵌入 CSS 更可靠。
+    */
+  </style>
+</head>
+<body>
+<div class="main-container">
+<!-- 报告头部信息：将由 Python 动态填充 -->
+<h1 align="center">FCCU Simulation Results</h1>
+<h3 align="center">Last Updated: 2025-06-04_19-04-49-544418</h3>
+<h3 align="center">Branch: /scratch/project/M0001/regression/fccu/work/default/fccu-vcs</h3>
+<h3 align="center">Simulator: VCS</h3>
+<!-- Rerun Console: 这是固定的 HTML 结构 -->
+<div class="rerun-console">
+<h2>Rerun Console</h2>
+<div class="console-grid">
+<div class="console-item">
+<label><input id="openCoverage" type="checkbox"/> Open Coverage</label>
+</div>
+<div class="console-item">
+<label><input checked="" id="rebuildCases" type="checkbox"/> Rebuild All Selected Cases</label>
+</div>
+<div class="console-item">
+<label><input id="includeWaveform" type="checkbox"/> Include Waveform in Rebuild</label>
+</div>
+<div class="console-item">
+<label for="simTime">Simulation Time (hours):</label>
+<input id="simTime" min="0" type="number" value="0"/>
+</div>
+<div class="console-item">
+<label for="dirOption">Directory (-dir):</label>
+<input id="dirOption" placeholder="e.g., my_rerun_dir" type="text"/>
+</div>
+<div class="console-item">
+<label for="elabOpts">-elab_opts:</label>
+<input id="elabOpts" placeholder="e.g., +define+ABC" type="text"/>
+</div>
+<div class="console-item">
+<label for="vloganOpts">-vlogan_opts:</label>
+<input id="vloganOpts" placeholder="e.g., +incdir+../src" type="text"/>
+</div>
+<div class="console-item">
+<label for="runOpts">-run_opts:</label>
+<input id="runOpts" placeholder="e.g., +UVM_TESTNAME=my_test" type="text"/>
+</div>
+</div>
+<div class="button-bar">
+<button id="selectNonPassedButton" onclick="selectAllNonPassed()">Select All Non-Passed Cases</button>
+<button id="runRegressionButton" onclick="runRegression()">Run Selected Cases</button>
+</div>
+</div>
+<!-- Rerun Job Status: 这是固定的 HTML 结构，内容由 JS 动态更新 -->
+<div id="rerunStatusContainer" style="display: none;">
+<h3>Rerun Job Status</h3>
+<div class="progress-indicator-container" id="progressIndicator" style="display: none;">
+<div class="progress-circle" id="progressCircleHost">
+<svg class="circular-chart" height="60" viewbox="0 0 36 36" width="60">
+<path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"></path>
+<path class="circle" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" id="progressCirclePath" stroke-dasharray="0, 100"></path>
+<text class="percentage-text" id="progressText" x="18" y="20.35">0%</text>
+</svg>
+</div>
+<div class="progress-status-text" id="progressStatusText">Initializing...</div>
+</div>
+<p id="rerunStatusMessage" style="display: none;">Idle</p>
+<pre id="rerunJobDetails" style="text-align: left; background-color: #fff; padding: 10px; border: 1px solid #ccc; max-height: 200px; overflow-y: auto; display: none; margin-top:10px;"></pre>
+</div>
+<!-- 原始报告内容占位符 -->
+<!-- Python 脚本 (使用 BeautifulSoup) 将会把从 Markdown 生成的 HTML 内容 (如状态总结、详细表格、失败桶) 插入到这里 -->
+<div id="original-report-content-placeholder">
+<!-- 例如，dvsim 生成的 "Run Job Status Summary" H2 和 ul 将被插入此处 -->
+<!-- dvsim 生成的 "Detailed Run Job Statuses" H2 和 table (修改后) 将被插入此处 -->
+<!-- dvsim 生成的 "Failure Buckets" H2 和 ul 将被插入此处 -->
+<h2 align="center">Run Job Status Summary</h2><ul>
+<li>Passed: 0</li>
+<li>Failed: 0</li>
+<li>Killed: 2</li>
+<li>Dispatched/Running: 0</li>
+<li>Queued: 0</li>
+<li>Pending/Not Scheduled: 0</li>
+</ul><h2 align="center">Detailed Run Job Statuses</h2><table class="results" id="detailedStatusTable">
+<thead>
+<tr>
+<th align="left">Job Name (Test Seed)</th>
+<th align="center">Status</th>
+<th align="center">Pass Rate</th>
+<th align="left">Log Path</th>
+<th align="left">Error Hint (if Failed/Killed)</th>
+<th align="left">Select for Rerun</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">fccu_amba_smoke (Seed: 1425527086)</td>
+<td align="center">K</td>
+<td align="center">0%</td>
+<td align="left"><code>sim/fccu_amba_smoke.0/2025-06-04_19-04-49-544418/run.log</code></td>
+<td align="left">Job killed most likely because its dependent job failed.</td>
+<td align="left"><input class="rerun-checkbox" data-casename="fccu_amba_smoke" data-seed="1425527086" type="checkbox"/></td>
+</tr>
+<tr>
+<td align="left">fccu_smoke (Seed: 635573871)</td>
+<td align="center">K</td>
+<td align="center">0%</td>
+<td align="left"><code>sim/fccu_smoke.0/2025-06-04_19-04-49-544418/run.log</code></td>
+<td align="left">Job killed most likely because its dependent job failed.</td>
+<td align="left"><input class="rerun-checkbox" data-casename="fccu_smoke" data-seed="635573871" type="checkbox"/></td>
+</tr>
+<tr>
+<td align="left"><strong>Total Run Jobs</strong></td>
+<td align="center">Completed: 2</td>
+<td align="center"><strong>0.00%</strong></td>
+<td align="left">(2 total logs)</td>
+<td align="left">Failed/Killed: 2</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table><h2 align="center">Failure Buckets (Live Update)</h2><html><body><ul>
+<li><strong>Bucket: <code>Job killed most likely because its dependent job failed.</code></strong> (2 failures):
+<ul>
+<li>
+<p>Test <code>fccu_smoke</code> (1 failing seeds):</p>
+<ul>
+<li>fccu_smoke.0.635573871<br/>
+Log: <code>/scratch/project/M0001/regression/fccu/work/default/fccu-vcs/sim/fccu_smoke.0/2025-06-04_19-04-49-544418/run.log</code></li>
+</ul>
+</li>
+<li>
+<p>Test <code>fccu_amba_smoke</code> (1 failing seeds):</p>
+<ul>
+<li>fccu_amba_smoke.0.1425527086<br/>
+Log: <code>/scratch/project/M0001/regression/fccu/work/default/fccu-vcs/sim/fccu_amba_smoke.0/2025-06-04_19-04-49-544418/run.log</code></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul></body></html></div>
+</div>
+<script type="text/javascript">
+// // live_report_scripts.js
+
+function selectAllNonPassed() {
+    console.log("selectAllNonPassed called, current state nonPassedCasesSelected:", window.nonPassedCasesSelected);
+    const checkboxes = document.querySelectorAll('#detailedStatusTable tbody .rerun-checkbox');
+    const rows = document.querySelectorAll('#detailedStatusTable tbody tr');
+    const button = document.getElementById('selectNonPassedButton');
+
+    if (!window.nonPassedCasesSelected) {
+        // Action: Select all non-passed cases
+        rows.forEach((row, index) => {
+            if (checkboxes[index]) { // Ensure checkbox exists for the row
+                const statusCell = row.cells[1]; // Status is the second cell
+                if (statusCell) {
+                    const status = statusCell.innerText.trim().toUpperCase();
+                    if (status !== 'P') { // P = PASSED
+                        checkboxes[index].checked = true;
+                    } else {
+                        // Optional: ensure passed cases are unchecked if that's desired behavior
+                        // checkboxes[index].checked = false;
+                    }
+                }
+            }
+        });
+        window.nonPassedCasesSelected = true;
+        if (button) button.innerText = "Deselect Non-Passed Cases";
+        console.log("Selected non-passed. New state nonPassedCasesSelected:", window.nonPassedCasesSelected);
+    } else {
+        // Action: Deselect all non-passed cases (or all cases selected by this button)
+        rows.forEach((row, index) => {
+            if (checkboxes[index]) { // Ensure checkbox exists for the row
+                 const statusCell = row.cells[1]; // Status is the second cell
+                 if (statusCell) {
+                    const status = statusCell.innerText.trim().toUpperCase();
+                    if (status !== 'P') { // Only deselect those that are non-passed
+                        checkboxes[index].checked = false;
+                    }
+                 }
+            }
+        });
+        window.nonPassedCasesSelected = false;
+        if (button) button.innerText = "Select All Non-Passed Cases";
+        console.log("Deselected non-passed. New state nonPassedCasesSelected:", window.nonPassedCasesSelected);
+    }
+}
+
+let currentJobId = null;
+let pollingInterval = null;
+let displayedOutputLinesCount = 0;
+const runButton = document.getElementById('runRegressionButton');
+const statusContainer = document.getElementById('rerunStatusContainer');
+const statusMessageEl = document.getElementById('rerunStatusMessage'); // Old status message <p>
+const jobDetailsEl = document.getElementById('rerunJobDetails');
+const progressIndicatorEl = document.getElementById('progressIndicator');
+const progressCircleHostEl = document.getElementById('progressCircleHost'); // Element to apply color class to
+const progressCirclePathEl = document.getElementById('progressCirclePath');
+const progressTextEl = document.getElementById('progressText');
+const progressStatusTextEl = document.getElementById('progressStatusText');
+
+
+function updateStatusDisplay(status, message, jobData) {
+    statusContainer.style.display = 'block';
+    jobDetailsEl.style.display = 'block';
+    progressIndicatorEl.style.display = 'flex'; // Show progress indicator
+    statusMessageEl.style.display = 'none'; // Hide old status message <p>
+
+    let currentOverallStatusText = message || status.replace(/_/g, ' ');
+    let progressCircleColorClass = 'progress-circle-blue'; // Default for running/preparing/queued
+    let percentage = 0;
+    let showSpinner = true; // Show spinner for intermediate states
+
+    // Handle progress_summary if available for more detailed text and circle color
+    if (jobData && jobData.progress_summary) {
+        const summary = jobData.progress_summary;
+        if (summary.total_selected > 0) {
+            percentage = Math.round((summary.processed_count / summary.total_selected) * 100);
+        } else { // No cases selected, but job might be running/completed
+            percentage = (status === 'completed' || status === 'failed') ? 100 : 0;
+        }
+
+        currentOverallStatusText = `${status.replace(/_/g, ' ')}: ${summary.processed_count}/${summary.total_selected} cases processed`;
+        if (summary.failed_count > 0) {
+            currentOverallStatusText += ` (${summary.failed_count} failed)`;
+            progressCircleColorClass = 'progress-circle-red';
+        } else if (summary.passed_count > 0 && summary.failed_count === 0) {
+             // If some passed and no fails yet, could be yellow if still running, or green if all processed passed
+            if (summary.processed_count === summary.total_selected) {
+                 progressCircleColorClass = 'progress-circle-green';
+            } else {
+                 progressCircleColorClass = 'progress-circle-yellow'; // Still running, some passed, no fails
+            }
+        } else if (summary.processed_count < summary.total_selected && summary.failed_count === 0) {
+            progressCircleColorClass = 'progress-circle-blue'; // Still running, nothing decisive yet or just started
+        }
+    }
+
+    // Override for final states
+    switch(status) {
+        case 'completed':
+            currentOverallStatusText = `Completed: ${message || 'All selected cases processed.'}`;
+            progressCircleColorClass = 'progress-circle-green';
+            percentage = 100;
+            showSpinner = false;
+            break;
+        case 'failed':
+            currentOverallStatusText = `Failed: ${message || 'One or more operations failed.'}`;
+            progressCircleColorClass = 'progress-circle-red';
+            // Percentage might be based on progress_summary if available, or 100 if it's a general job failure
+            if (!jobData || !jobData.progress_summary || jobData.progress_summary.total_selected === 0) {
+                percentage = 100; // Indicate completion of the attempt, albeit failed
+            }
+            showSpinner = false;
+            break;
+        case 'queued':
+            currentOverallStatusText = "Queued...";
+            progressCircleColorClass = 'progress-circle-blue';
+            percentage = 0;
+            break;
+        case 'preparing_hjson':
+            currentOverallStatusText = "Preparing HJSON...";
+            progressCircleColorClass = 'progress-circle-blue';
+            percentage = 0; // Or a small fixed value like 5%
+            break;
+        case 'hjson_prepared':
+            currentOverallStatusText = "HJSON Prepared, Starting MSIM...";
+            progressCircleColorClass = 'progress-circle-blue';
+            percentage = 10; // Or a small fixed value
+            break;
+        case 'running_msim':
+             // Text and color already handled by progress_summary logic mostly
+            if (!jobData || !jobData.progress_summary) { // Fallback if no summary yet
+                currentOverallStatusText = "Running MSIM...";
+            }
+            break;
+        default: // Unknown status
+            currentOverallStatusText = status || 'Idle';
+            progressCircleColorClass = 'progress-circle-blue';
+            percentage = 0;
+            showSpinner = false;
+    }
+
+    progressCircleHostEl.className = `progress-circle ${progressCircleColorClass}`;
+    progressCirclePathEl.setAttribute('stroke-dasharray', `${percentage}, 100`);
+    progressTextEl.textContent = `${percentage}%`;
+    progressStatusTextEl.textContent = currentOverallStatusText;
+
+    // Show/hide spinner within the progressStatusTextEl if needed, or rely on circle animation
+    // For simplicity, the circle itself animates. Spinner can be removed or used as an overlay.
+    // The old spinner logic on statusMessageEl is now superseded.
+
+    // Streaming output display
+    if (jobData && jobData.output_lines && Array.isArray(jobData.output_lines)) {
+        const newLines = jobData.output_lines.slice(displayedOutputLinesCount);
+        if (newLines.length > 0) {
+            jobDetailsEl.textContent += newLines.join('\n') + '\n';
+            displayedOutputLinesCount = jobData.output_lines.length;
+            jobDetailsEl.scrollTop = jobDetailsEl.scrollHeight;
+        }
+    }
+
+    if (status === 'completed' || status === 'failed') {
+        if (jobData && jobData.stdout && displayedOutputLinesCount === 0) {
+            jobDetailsEl.textContent = `Command: ${jobData.command || 'N/A'}\nReturn Code: ${jobData.returncode}\n\nOutput:\n${jobData.stdout}`;
+        }
+        if (status === 'failed' && jobData && jobData.message && !jobDetailsEl.textContent.includes(jobData.message)) {
+             jobDetailsEl.textContent += `\nFINAL STATUS: ${jobData.message}\n`;
+        }
+        jobDetailsEl.scrollTop = jobDetailsEl.scrollHeight;
+
+        if (pollingInterval) clearInterval(pollingInterval);
+        pollingInterval = null;
+        currentJobId = null;
+        runButton.disabled = false;
+        runButton.innerText = "Run Selected Cases";
+
+        if (jobData && jobData.detailed_test_results && Array.isArray(jobData.detailed_test_results)) {
+            updateMainReportTable(jobData.detailed_test_results);
+        }
+    } else {
+        runButton.disabled = true;
+        runButton.innerText = "Rerun in Progress...";
+    }
+}
+
+function updateMainReportTable(detailedTestResults) {
+    console.log("Updating main report table with results:", detailedTestResults);
+    const tableBody = document.querySelector('#detailedStatusTable tbody');
+    if (!tableBody) {
+        console.error("Detailed status table body not found.");
+        return;
+    }
+    const jobNameParseRegexForRow = /^(.*?)\s*\(Seed:\s*(\d+)\)$/;
+
+    detailedTestResults.forEach(result => {
+        const resultIdFromServer = result.id;
+
+        const rows = tableBody.querySelectorAll('tr');
+        rows.forEach(row => {
+            const checkbox = row.querySelector('.rerun-checkbox');
+            const jobNameCell = row.cells[0];
+            const logPathCell = row.cells[3]; // Log path is the fourth cell
+
+            if (checkbox && jobNameCell) {
+                const fullJobNameText = jobNameCell.innerText.trim();
+                const nameMatch = fullJobNameText.match(jobNameParseRegexForRow);
+
+                if (nameMatch && nameMatch[1] && nameMatch[2]) {
+                    const rowParsedBaseName = nameMatch[1].trim();
+                    const rowParsedSeed = nameMatch[2].trim();
+                    const rowGeneratedId = `${rowParsedBaseName}_seed${rowParsedSeed}`;
+
+                    if (rowGeneratedId === resultIdFromServer) {
+                        const statusCell = row.cells[1];
+                        const passRateCell = row.cells[2];
+                        const errorHintCell = row.cells[4];
+
+                        if (statusCell) {
+                            let statusText = 'U';
+                            let statusClass = 'status-U';
+                            switch (result.status.toUpperCase()) {
+                                case 'PASSED': statusText = 'P'; statusClass = 'status-P'; break;
+                                case 'FAILED': statusText = 'F'; statusClass = 'status-F'; break;
+                                case 'KILLED': statusText = 'K'; statusClass = 'status-K'; break;
+                                default: statusText = result.status.charAt(0).toUpperCase() || 'U';
+                            }
+                            statusCell.innerText = statusText;
+                            statusCell.className = `status-${statusText}`; // Ensure class matches text for styling
+                        }
+
+                        if (passRateCell) {
+                            passRateCell.innerText = (result.status.toUpperCase() === 'PASSED') ? '100%' : '0%';
+                        }
+                        if (errorHintCell) {
+                            errorHintCell.innerText = result.error_hint || '';
+                        }
+                        // Update Log Path
+                        if (logPathCell && result.new_log_path) {
+                            const codeTag = logPathCell.querySelector('code');
+                            if (codeTag) {
+                                codeTag.innerText = result.new_log_path;
+                                console.log(`Updated log path for ${resultIdFromServer} to ${result.new_log_path}`);
+                            } else { // Fallback if no <code> tag, just update cell (less ideal)
+                                logPathCell.innerText = result.new_log_path;
+                            }
+                        }
+                        console.log(`Updated row for ${resultIdFromServer} to status ${result.status}`);
+                    }
+                }
+            }
+        });
+    });
+    // Call to update the summary table after main table is updated
+    if (typeof updateDetailedStatusSummary === 'function') {
+        updateDetailedStatusSummary();
+    } else {
+        console.error("updateDetailedStatusSummary function not found after updating main report table.");
+    }
+}
+
+
+function pollJobStatus(jobId) {
+    fetch(`/live_reporter/rerun_status/${jobId}`) // Add /live_reporter prefix
+    .then(response => {
+        if (!response.ok) {
+            return response.json().catch(() => null).then(errData => {
+                const errorMsg = errData && errData.message ? errData.message : response.statusText;
+                throw new Error(`HTTP error ${response.status}: ${errorMsg}`);
+            });
+        }
+        return response.json();
+    })
+    .then(data => {
+        console.log('Poll status response:', data);
+        updateStatusDisplay(data.status, data.message, data);
+    })
+    .catch(error => {
+        console.error('Error polling job status:', error);
+        updateStatusDisplay('failed', `Error polling status: ${error.message}`, {}); // Pass empty jobData on error
+        if (pollingInterval) clearInterval(pollingInterval);
+        pollingInterval = null;
+        currentJobId = null;
+        runButton.disabled = false;
+        runButton.innerText = "Run Selected Cases";
+    });
+}
+
+function runRegression() {
+    if (currentJobId && progressIndicatorEl.style.display === 'flex' &&
+        !(progressStatusTextEl.textContent.toLowerCase().includes('completed') || progressStatusTextEl.textContent.toLowerCase().includes('failed'))) {
+        alert("A rerun job is already in progress and not yet completed/failed.");
+        return;
+    }
+    currentJobId = null;
+    displayedOutputLinesCount = 0;
+    if(jobDetailsEl) jobDetailsEl.textContent = '';
+    progressIndicatorEl.style.display = 'none'; // Hide old progress if any
+
+    console.log("runRegression called");
+    const selectedCaseIdentifiersSet = new Set();
+    const jobNameParseRegex = /^(.*?)\s*\(Seed:\s*(\d+)\)$/;
+
+    document.querySelectorAll('#detailedStatusTable tbody .rerun-checkbox:checked').forEach(checkbox => {
+        const row = checkbox.closest('tr');
+        if (!row) {
+            console.error("Could not find parent row for a selected checkbox:", checkbox); return;
+        }
+        const jobNameCell = row.cells[0];
+        if (jobNameCell) {
+            const fullJobNameText = jobNameCell.innerText.trim();
+            const nameMatch = fullJobNameText.match(jobNameParseRegex);
+            if (nameMatch && nameMatch[1] && nameMatch[2]) {
+                const parsedBaseName = nameMatch[1].trim();
+                const parsedSeed = nameMatch[2].trim();
+                const uniqueCaseId = `${parsedBaseName}_seed${parsedSeed}`;
+                selectedCaseIdentifiersSet.add(uniqueCaseId);
+            } else {
+                console.error(`Could not parse job name text "${fullJobNameText}" from cell for checkbox:`, checkbox);
+            }
+        } else {
+            console.error("Could not find job name cell for a selected checkbox's row:", checkbox);
+        }
+    });
+    const selectedCasesToRerun = Array.from(selectedCaseIdentifiersSet);
+
+    let fullBranchPath = "";
+    const branchHeader = Array.from(document.querySelectorAll('h3')).find(h3 => h3.innerText.startsWith("Branch:"));
+    if (branchHeader) {
+        fullBranchPath = branchHeader.innerText.replace("Branch: ", "").trim();
+    } else {
+        console.warn("Branch H3 tag not found. branchPath will be empty.");
+    }
+
+    let vcsContext = "default-vcs";
+    if (fullBranchPath) {
+        const pathParts = fullBranchPath.split('/');
+        const potentialVcsDir = pathParts[pathParts.length - 1];
+        if (potentialVcsDir && potentialVcsDir.includes("-vcs")) {
+            vcsContext = potentialVcsDir;
+        }
+    }
+
+    let clientDerivedWorkDir = "";
+    const currentUrl = window.location.href;
+    if (currentUrl.startsWith("file:///")) {
+        const pathParts = currentUrl.substring("file:///".length).split('/');
+        const workIndex = pathParts.indexOf("work");
+        if (workIndex !== -1 && workIndex + 1 < pathParts.length) {
+            clientDerivedWorkDir = pathParts[workIndex + 1];
+            console.log("Client derived work directory from file path:", clientDerivedWorkDir);
+        } else {
+            console.log("Could not derive client work directory from file path:", currentUrl);
+        }
+    }
+
+    const rerunOptions = {
+        openCoverage: document.getElementById('openCoverage').checked,
+        rebuildCases: document.getElementById('rebuildCases').checked,
+        includeWaveform: document.getElementById('includeWaveform').checked,
+        simTimeHours: document.getElementById('simTime').value,
+        dirOption: document.getElementById('dirOption').value.trim(),
+        elabOpts: document.getElementById('elabOpts').value.trim(),
+        vloganOpts: document.getElementById('vloganOpts').value.trim(),
+        runOpts: document.getElementById('runOpts').value.trim(),
+        selectedCases: selectedCasesToRerun,
+        branchPath: fullBranchPath,
+        vcsContext: vcsContext,
+        actualWorkDirFromFilePath: clientDerivedWorkDir // Add the new field
+    };
+
+    if (rerunOptions.selectedCases.length === 0) {
+        alert("No cases selected for rerun.");
+        return;
+    }
+    if (!rerunOptions.branchPath) {
+        alert("Error: Branch information could not be found. Server needs this to locate HJSON files.");
+        updateStatusDisplay('failed', 'Failed to start: Branch information missing.', {});
+        return;
+    }
+
+    updateStatusDisplay('queued', 'Initiating rerun request...', {}); // Initial display
+    runButton.disabled = true;
+    runButton.innerText = "Rerun in Progress...";
+
+    // Extract repo_id from the current URL's path
+    const pathSegments = window.location.pathname.split('/');
+    // Assuming URL is like /<repo_id> or /<repo_id>/, get the last non-empty segment
+    let repoId = "";
+    for (let i = pathSegments.length - 1; i >= 0; i--) {
+        if (pathSegments[i]) {
+            repoId = pathSegments[i];
+            break;
+        }
+    }
+
+    if (!repoId) {
+        alert("Error: Could not determine repository ID from the current URL. Rerun cannot proceed.");
+        console.error("Failed to extract repoId from path:", window.location.pathname);
+        updateStatusDisplay('failed', 'Failed to start: Repository ID missing from URL.', {});
+        runButton.disabled = false; // Re-enable button
+        runButton.innerText = "Run Selected Cases";
+        return;
+    }
+    console.log("Using repoId for rerun:", repoId);
+
+    fetch(`/live_reporter/rerun/${repoId}`, { // Add /live_reporter prefix
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', },
+        body: JSON.stringify(rerunOptions),
+    })
+    .then(response => {
+        if (!response.ok) {
+             return response.json().then(errData => {
+                throw new Error(`Server error ${response.status}: ${errData.message || 'Unknown error'}`);
+            }).catch(() => {
+                throw new Error(`Server error ${response.status}: ${response.statusText}`);
+            });
+        }
+        return response.json();
+    })
+    .then(data => {
+        console.log('Initial response from backend:', data);
+        if (data.job_id) {
+            currentJobId = data.job_id;
+            // Initial status display before first poll
+            updateStatusDisplay('queued', `Rerun initiated. Job ID: ${currentJobId}. Polling...`, { progress_summary: { total_selected: selectedCasesToRerun.length, processed_count: 0, passed_count: 0, failed_count: 0 } });
+            pollingInterval = setInterval(() => pollJobStatus(currentJobId), 2000); // Poll every 2 seconds
+        } else {
+            updateStatusDisplay('failed', `Failed to initiate rerun: ${data.message || 'No Job ID received'}`, {});
+            runButton.disabled = false;
+            runButton.innerText = "Run Selected Cases";
+        }
+    })
+    .catch((error) => {
+        console.error('Error sending data to backend:', error);
+        updateStatusDisplay('failed', `Error communicating with server: ${error.message}`, {});
+        runButton.disabled = false;
+        runButton.innerText = "Run Selected Cases";
+    });
+}
+function updateDetailedStatusSummary() {
+    const tableBody = document.querySelector('#detailedStatusTable tbody');
+    if (!tableBody) {
+        console.error('Detailed status table body not found for summary update.');
+        return;
+    }
+
+    let totalCases = 0;
+    let passedCases = 0;
+    let failedOrKilledCases = 0;
+
+    const rows = tableBody.querySelectorAll('tr');
+    rows.forEach(row => {
+        const checkbox = row.querySelector('input.rerun-checkbox');
+        if (checkbox) { // This identifies a test case row
+            totalCases++;
+            const statusCell = row.cells[1]; // Second cell for status (P, F, K)
+            if (statusCell) {
+                const statusText = statusCell.innerText.trim().toUpperCase();
+                if (statusText === 'P') {
+                    passedCases++;
+                } else if (statusText === 'F' || statusText === 'K') {
+                    failedOrKilledCases++;
+                }
+            }
+        }
+    });
+
+    const summaryRow = tableBody.querySelector('tr:last-child');
+    if (summaryRow && summaryRow.cells.length >= 5) {
+        const firstCellStrong = summaryRow.cells[0].querySelector('strong');
+        if (firstCellStrong && firstCellStrong.innerText.trim() === 'Total Run Jobs') {
+            const summaryCompletedCell = summaryRow.cells[1];
+            const summaryPassRateCell = summaryRow.cells[2];
+            const summaryTotalLogsCell = summaryRow.cells[3];
+            const summaryFailedKilledCell = summaryRow.cells[4];
+
+            summaryCompletedCell.innerText = `Completed: ${totalCases}`;
+            const passRate = (totalCases > 0) ? (passedCases / totalCases) * 100 : 0;
+            summaryPassRateCell.innerHTML = `<strong>${passRate.toFixed(2)}%</strong>`;
+            summaryTotalLogsCell.innerText = `(${totalCases} total logs)`;
+            summaryFailedKilledCell.innerText = `Failed/Killed: ${failedOrKilledCases}`;
+
+            console.log(`Summary updated (via function): Total=${totalCases}, Passed=${passedCases}, Failed/Killed=${failedOrKilledCases}, Rate=${passRate.toFixed(2)}%`);
+        } else {
+            console.error('Could not confirm the summary row by its first cell content for update (called via function).');
+        }
+    } else {
+        console.error('Summary row not found or has unexpected structure for update (called via function).');
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    updateDetailedStatusSummary(); // Initial call on page load
+});
+// 这里的 JavaScript 内容将由 Python 脚本在运行时填充
+// 或者，如果您更喜欢外部链接并且 JS 文件位置固定，可以使用：
+// <script src="path/to/your/live_report_scripts.js"></script>
+</body>
+</html>

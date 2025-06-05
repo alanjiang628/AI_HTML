@@ -479,95 +479,216 @@ def long_running_rerun_task(job_id, options, current_app_logger, actual_flask_ap
                 f"{msim_executable_and_args}"
             )
             
-            # The Popen cwd is project_root_for_icenv (git_pull_dir).
-            update_job_status(job_id, "running_msim", f"Pulling latest changes in {git_pull_dir} and executing MSIM command...", 
-                              command=f"git pull && {msim_executable_and_args} (executed in {git_pull_dir} after icenv setup)")
-            add_output_line_to_job(job_id, f"Executing shell command (CWD for shell, git pull, and msim: {git_pull_dir}): {shell_exec_command}")
+            # --- Stage 1: Git Pull ---
+            update_job_status(job_id, "git_pulling", f"Pulling latest changes in {git_pull_dir}...")
+            git_pull_shell_command = (
+                f"source ~/.cshrc && "
+                f"{icenv_script_path} && "
+                f"{module_load_command} && "
+                f"git pull"
+            )
+            add_output_line_to_job(job_id, f"Executing Git pull (CWD: {git_pull_dir}): {git_pull_shell_command}")
+            logger_to_use_start.info(f"Job {job_id}: Executing Git pull command: {git_pull_shell_command} in CWD: {git_pull_dir}")
+
+            git_pull_success = False
+            try:
+                process_git_pull = subprocess.Popen(git_pull_shell_command,
+                                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                                 text=True, bufsize=1, universal_newlines=True,
+                                                 shell=True, executable='tcsh', cwd=git_pull_dir) # git_pull_dir is project_root_for_icenv
+                if process_git_pull.stdout:
+                    for line in iter(process_git_pull.stdout.readline, ''):
+                        # print(f"GitPull STDOUT for {job_id}: {line.strip()}", flush=True) # Server console log
+                        add_output_line_to_job(job_id, f"[GIT PULL] {line.strip()}")
+                    process_git_pull.stdout.close()
+
+                git_pull_return_code = process_git_pull.wait()
+                git_pull_stderr_output = ""
+                if process_git_pull.stderr:
+                    git_pull_stderr_output = process_git_pull.stderr.read()
+                    process_git_pull.stderr.close()
+                    if git_pull_stderr_output:
+                        add_output_line_to_job(job_id, "Git Pull Stderr:")
+                        for line_err in git_pull_stderr_output.splitlines():
+                            add_output_line_to_job(job_id, line_err.strip())
+                
+                if git_pull_return_code == 0:
+                    add_output_line_to_job(job_id, "Git pull successful.")
+                    logger_to_use_start.info(f"Job {job_id}: Git pull successful.")
+                    git_pull_success = True
+                else:
+                    error_message_git_pull = f"Git pull failed with return code {git_pull_return_code}."
+                    add_output_line_to_job(job_id, error_message_git_pull)
+                    logger_to_use_start.error(f"Job {job_id}: {error_message_git_pull}")
+                    update_job_status(job_id, "failed", error_message_git_pull, stderr=git_pull_stderr_output if git_pull_stderr_output else "No stderr from git pull.")
+                    return # Exit task
+
+            except FileNotFoundError:
+                error_message_fnf_git = "Shell (tcsh) or git command not found during git pull. Ensure tcsh and git are accessible in PATH."
+                add_output_line_to_job(job_id, f"Error: {error_message_fnf_git}")
+                logger_to_use_start.error(f"Job {job_id}: {error_message_fnf_git}")
+                update_job_status(job_id, "failed", error_message_fnf_git)
+                return
+            except Exception as e_git_pull:
+                error_message_exc_git = f"An error occurred during git pull: {e_git_pull}"
+                add_output_line_to_job(job_id, f"Error: {error_message_exc_git}")
+                logger_to_use_start.error(f"Job {job_id}: {error_message_exc_git}", exc_info=True)
+                update_job_status(job_id, "failed", error_message_exc_git)
+                return
+
+            if not git_pull_success: # Safeguard, should have been caught by returns above
+                logger_to_use_start.error(f"Job {job_id}: Git pull was marked as unsuccessful but did not return early. Forcing failure.")
+                update_job_status(job_id, "failed", "Git pull reported as failed (safeguard), aborting task.")
+                return
+
+            # --- Stage 2: Prepare HJSON files (uses updated files from git pull) ---
+            update_job_status(job_id, "preparing_hjson", "Preparing HJSON files (post git pull)...")
+            logger_to_use_start.info(f"Job {job_id}: Starting HJSON preparation after successful git pull.")
+            # temp_rerun_dir and derived_ip_name are already available from earlier in the function.
+            # ip_names_to_process is also available.
+            
+            generated_hjson_paths_map = {}
+            all_hjson_prepared_successfully = True
+            for ip_name_hjson_prep in ip_names_to_process:
+                hjson_path = prepare_rerun_hjson_files(project_root_for_icenv, options, temp_rerun_dir, ip_name_hjson_prep)
+                if hjson_path:
+                    generated_hjson_paths_map[ip_name_hjson_prep] = hjson_path
+                else:
+                    all_hjson_prepared_successfully = False
+                    logger_to_use_start.error(f"Job {job_id}: HJSON preparation failed for IP: {ip_name_hjson_prep}")
+                    break # Stop processing further IPs if one fails
+            
+            if not all_hjson_prepared_successfully:
+                update_job_status(job_id, "failed", "HJSON preparation failed for one or more IPs.")
+                # Consider cleaning up temp_rerun_dir here if needed
+                return
+            if not generated_hjson_paths_map: # Should be caught by above if loop runs but nothing generated
+                update_job_status(job_id, "failed", "No HJSON files were generated after git pull (or no IPs to process).")
+                return
+
+            # --- Stage 3: MSIM Execution ---
+            update_job_status(job_id, "hjson_prepared", "HJSON files prepared. Starting MSIM...")
+            logger_to_use_start.info(f"Job {job_id}: HJSON files prepared. Assembling MSIM command.")
+            # msim_executable_and_args is already constructed earlier and contains only the msim command parts.
+            
+            msim_shell_command = (
+                f"source ~/.cshrc && "
+                f"{icenv_script_path} && "
+                f"{module_load_command} && "
+                f"{msim_executable_and_args}"
+            )
+            # Update job status with only the msim command part for clarity in UI
+            update_job_status(job_id, "running_msim", f"Executing MSIM command in {git_pull_dir}...", 
+                              command=f"{msim_executable_and_args} (executed in {git_pull_dir} after icenv setup)")
+            add_output_line_to_job(job_id, f"Executing MSIM (CWD: {git_pull_dir}): {msim_shell_command}")
             add_output_line_to_job(job_id, "This may take some time...")
+            logger_to_use_start.info(f"Job {job_id}: Executing MSIM command: {msim_shell_command} in CWD: {git_pull_dir}")
 
-            process_return_code = None # Initialize here
-            process_stderr_output = "" # Initialize here
+            process_return_code = None 
+            process_stderr_output = ""
+            msim_stdout_start_index = len(JOB_STATUS[job_id].get("output_lines", [])) # For isolating MSIM stdout
 
-            try: # INNER TRY for subprocess.Popen
-                add_output_line_to_job(job_id, "Using inherited environment for subprocess.")
-                add_output_line_to_job(job_id, f"Attempting to execute shell command with tcsh. Ensure 'tcsh' is in the inherited PATH.")
+            try: # INNER TRY for MSIM subprocess.Popen
+                add_output_line_to_job(job_id, "Using inherited environment for MSIM subprocess.")
+                add_output_line_to_job(job_id, f"Attempting to execute MSIM shell command with tcsh. Ensure 'tcsh' is in the inherited PATH.")
 
-                process = subprocess.Popen(shell_exec_command,
-                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                         text=True, bufsize=1, universal_newlines=True,
-                                         shell=True, executable='tcsh', cwd=project_root_for_icenv)
+                process_msim = subprocess.Popen(msim_shell_command,
+                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                             text=True, bufsize=1, universal_newlines=True,
+                                             shell=True, executable='tcsh', cwd=git_pull_dir) # git_pull_dir is project_root_for_icenv
 
-                if process.stdout:
-                    for line in iter(process.stdout.readline, ''):
-                        print(line, end='')
-                        add_output_line_to_job(job_id, line.strip())
-                    process.stdout.close()
+                if process_msim.stdout:
+                    for line in iter(process_msim.stdout.readline, ''):
+                        # print(f"MSIM STDOUT for {job_id}: {line.strip()}", flush=True) # Server console log
+                        add_output_line_to_job(job_id, line.strip()) # Add raw line, parsing will handle UVM_TEST_DONE
+                    process_msim.stdout.close()
 
-                process_return_code = process.wait()
+                process_return_code = process_msim.wait()
 
-                if process.stderr:
-                    process_stderr_output = process.stderr.read()
-                    process.stderr.close()
+                if process_msim.stderr:
+                    process_stderr_output = process_msim.stderr.read()
+                    process_msim.stderr.close()
                     if process_stderr_output:
-                        add_output_line_to_job(job_id, "Shell Stderr (includes msim stderr):")
+                        add_output_line_to_job(job_id, "MSIM Shell Stderr:")
                         for line_err in process_stderr_output.splitlines():
                             add_output_line_to_job(job_id, line_err.strip())
 
-                final_status_key_inner = "completed" if process_return_code == 0 else "failed"
-                final_status_message_inner = f"MSIM run (via shell with icenv) {'completed successfully' if process_return_code == 0 else f'failed with return code {process_return_code}'}."
-                update_job_status(job_id, final_status_key_inner, final_status_message_inner, returncode=process_return_code, stderr=process_stderr_output if process_return_code != 0 else None)
-                add_output_line_to_job(job_id, final_status_message_inner)
+                final_status_key_msim = "completed" if process_return_code == 0 else "failed"
+                final_status_message_msim = f"MSIM run {'completed successfully' if process_return_code == 0 else f'failed with return code {process_return_code}'}."
+                update_job_status(job_id, final_status_key_msim, final_status_message_msim, returncode=process_return_code, stderr=process_stderr_output if process_return_code != 0 else None)
+                add_output_line_to_job(job_id, final_status_message_msim)
+                logger_to_use_start.info(f"Job {job_id}: {final_status_message_msim}")
 
-            except FileNotFoundError: # For INNER TRY (Popen)
+            except FileNotFoundError:
                 process_return_code = -1 # Indicate failure
-                update_job_status(job_id, "failed", "Shell (tcsh) or core command (msim/icenv) not found. Ensure tcsh, icenv, and msim are accessible.")
-                add_output_line_to_job(job_id, "Error: Shell (tcsh) or essential command (msim/icenv) not found. Check PATH and icenv setup.")
-            except Exception as e_popen: # For INNER TRY (Popen)
+                error_message_fnf_msim = "Shell (tcsh) or msim command not found. Ensure tcsh and msim are accessible."
+                add_output_line_to_job(job_id, f"Error: {error_message_fnf_msim}")
+                logger_to_use_start.error(f"Job {job_id}: {error_message_fnf_msim}")
+                update_job_status(job_id, "failed", error_message_fnf_msim)
+                return # Exit task
+            except Exception as e_msim_popen:
                 process_return_code = -1 # Indicate failure
-                update_job_status(job_id, "failed", f"An error occurred during shell (msim with icenv) execution: {e_popen}")
-                add_output_line_to_job(job_id, f"Error during shell (msim with icenv) execution: {str(e_popen)}")
+                error_message_exc_msim = f"An error occurred during MSIM execution: {e_msim_popen}"
+                add_output_line_to_job(job_id, f"Error: {error_message_exc_msim}")
+                logger_to_use_start.error(f"Job {job_id}: {error_message_exc_msim}", exc_info=True)
+                update_job_status(job_id, "failed", error_message_exc_msim)
+                return # Exit task
 
-            # This code runs AFTER the inner try-except for Popen, still inside the OUTER try
-            full_msim_stdout = "\n".join(JOB_STATUS[job_id].get("output_lines", []))
-            proj_root_dir_for_logs = project_root_for_icenv
+            # --- Stage 4: Post MSIM processing ---
+            # Isolate MSIM-specific stdout for parsing
+            msim_specific_output_lines = JOB_STATUS[job_id].get("output_lines", [])[msim_stdout_start_index:]
+            full_msim_stdout_for_parsing = "\n".join(msim_specific_output_lines)
+            
+            proj_root_dir_for_logs = project_root_for_icenv # This is git_pull_dir
             actual_sim_root_for_parsing = None; base_log_path_for_html = None; log_path_error = False
 
-            if not proj_root_dir_for_logs:
-                add_output_line_to_job(job_id, "CRITICAL Error: Project root not available for log parsing.")
+            if not proj_root_dir_for_logs: # Should not happen if we reached here
+                add_output_line_to_job(job_id, "CRITICAL Error: Project root not available for log parsing (post-msim).")
                 log_path_error = True
             else:
-                # ... (vcs_context_basename determination) ...
                 vcs_context_from_client_for_log_parsing = options.get('vcsContext', '')
                 vcs_context_basename = os.path.basename(vcs_context_from_client_for_log_parsing) if vcs_context_from_client_for_log_parsing else ""
-                if not vcs_context_basename:
-                    current_full_branch_path_for_log_parsing = options.get('branchPath', '')
+                if not vcs_context_basename: # Fallback to deriving from branchPath if vcsContext is empty
+                    current_full_branch_path_for_log_parsing = options.get('branchPath', '') # This is the original branchPath from client
                     if current_full_branch_path_for_log_parsing:
                         vcs_context_basename = os.path.basename(current_full_branch_path_for_log_parsing)
-                # ... (actual_sim_root_for_parsing and base_log_path_for_html determination) ...
-                if final_msim_dir_option:
-                    actual_sim_root_for_parsing = os.path.join(proj_root_dir_for_logs, "work", final_msim_dir_option, vcs_context_basename, "sim")
-                    base_log_path_for_html = os.path.join("work", final_msim_dir_option, vcs_context_basename)
+                
+                if not vcs_context_basename: # If still no vcs_context_basename
+                    add_output_line_to_job(job_id, "Warning: Could not determine vcs_context_basename for log path construction.")
+                    log_path_error = True
                 else:
-                    current_full_branch_path_for_log_parsing = options.get('branchPath', '')
-                    extracted_branch_suffix = ""
-                    if "work/" in current_full_branch_path_for_log_parsing:
-                        extracted_branch_suffix = current_full_branch_path_for_log_parsing.split("work/", 1)[1]
-                    if not extracted_branch_suffix: log_path_error = True
-                    else:
-                        actual_sim_root_for_parsing = os.path.join(proj_root_dir_for_logs, "work", extracted_branch_suffix, "sim")
-                        base_log_path_for_html = os.path.join("work", extracted_branch_suffix)
+                    # final_msim_dir_option is determined earlier in the function
+                    if final_msim_dir_option:
+                        actual_sim_root_for_parsing = os.path.join(proj_root_dir_for_logs, "work", final_msim_dir_option, vcs_context_basename, "sim")
+                        base_log_path_for_html = os.path.join("work", final_msim_dir_option, vcs_context_basename)
+                    else: # Fallback if -dir was not used or derived
+                        current_full_branch_path_for_log_parsing = options.get('branchPath', '')
+                        extracted_branch_suffix = ""
+                        if "work/" in current_full_branch_path_for_log_parsing:
+                            extracted_branch_suffix = current_full_branch_path_for_log_parsing.split("work/", 1)[1]
+                        
+                        if not extracted_branch_suffix:
+                            add_output_line_to_job(job_id, "Warning: Could not extract branch suffix from branchPath for log path construction.")
+                            log_path_error = True
+                        else:
+                            actual_sim_root_for_parsing = os.path.join(proj_root_dir_for_logs, "work", extracted_branch_suffix, "sim")
+                            base_log_path_for_html = os.path.join("work", extracted_branch_suffix)
 
             if not log_path_error:
-                add_output_line_to_job(job_id, f"  Final calculated absolute sim root for parsing: {actual_sim_root_for_parsing}")
-                add_output_line_to_job(job_id, f"  Final calculated base relative path for HTML logs: {base_log_path_for_html}")
+                add_output_line_to_job(job_id, f"  Final calculated absolute sim root for parsing (post-msim): {actual_sim_root_for_parsing}")
+                add_output_line_to_job(job_id, f"  Final calculated base relative path for HTML logs (post-msim): {base_log_path_for_html}")
 
+            # Use full_msim_stdout_for_parsing which contains only MSIM output
             if log_path_error or not actual_sim_root_for_parsing or not os.path.isdir(actual_sim_root_for_parsing):
-                 detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout, options.get('selectedCases', []), None, None, job_id)
+                 add_output_line_to_job(job_id, "Warning: Log path error or invalid sim root. Parsing MSIM stdout without specific log file checks.")
+                 detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout_for_parsing, options.get('selectedCases', []), None, None, job_id)
             else:
-                detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout, options.get('selectedCases', []), actual_sim_root_for_parsing, base_log_path_for_html, job_id)
+                detailed_results = parse_msim_output_for_test_statuses(full_msim_stdout_for_parsing, options.get('selectedCases', []), actual_sim_root_for_parsing, base_log_path_for_html, job_id)
+            
             JOB_STATUS[job_id]['detailed_test_results'] = detailed_results
-            add_output_line_to_job(job_id, f"Final detailed test results: {detailed_results}")
+            add_output_line_to_job(job_id, f"Final detailed test results (post-msim): {detailed_results}")
 
+            # Update HTML report on disk
             if detailed_results and (JOB_STATUS[job_id]['status'] == "completed" or JOB_STATUS[job_id]['status'] == "failed"):
                 html_report_actual_path_from_options = options.get('html_report_actual_path')
                 if html_report_actual_path_from_options:

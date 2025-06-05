@@ -459,7 +459,7 @@ def long_running_rerun_task(job_id, options, current_app_logger, actual_flask_ap
             if run_opts_value: msim_command_parts.extend(["-ro", run_opts_value])
 
             msim_executable_and_args = " ".join(msim_command_parts)
-            icenv_script_path = "/remote/public/scripts/icenv.csh"
+            icenv_script_path = "source /remote/public/scripts/icenv.csh"
             module_load_command = "module load msim/v3p0"
             # Corrected: git_pull_dir is project_root_for_icenv
             git_pull_dir = project_root_for_icenv 
@@ -575,11 +575,13 @@ def long_running_rerun_task(job_id, options, current_app_logger, actual_flask_ap
                 f"source ~/.cshrc && "
                 f"{icenv_script_path} && "
                 f"{module_load_command} && "
+                f"echo 'DIAG_TRACE: Checking PRJ_ICDIR before msim execution.' && "
+                f"echo 'DIAG_PRJ_ICDIR_VALUE: '$PRJ_ICDIR && "
                 f"{msim_executable_and_args}"
             )
             # Update job status with only the msim command part for clarity in UI
             update_job_status(job_id, "running_msim", f"Executing MSIM command in {git_pull_dir}...", 
-                              command=f"{msim_executable_and_args} (executed in {git_pull_dir} after icenv setup)")
+                              command=f"{msim_executable_and_args} (executed in {git_pull_dir} after icenv setup with PRJ_ICDIR diagnostic)")
             add_output_line_to_job(job_id, f"Executing MSIM (CWD: {git_pull_dir}): {msim_shell_command}")
             add_output_line_to_job(job_id, "This may take some time...")
             logger_to_use_start.info(f"Job {job_id}: Executing MSIM command: {msim_shell_command} in CWD: {git_pull_dir}")

@@ -322,14 +322,140 @@ def prepare_rerun_hjson_files(project_root_for_hjson, options, temp_rerun_dir, i
         if job_id_for_logging: add_output_line_to_job(job_id_for_logging, f"Error: Failed to write HJSON {temp_target_hjson_path}: {e}")
         return None
 
+def calculate_total_stats_from_html(html_file_path, job_id_for_logging=None, logger_for_internal_errors=None):
+    """
+    Parses an HTML report file to calculate total test statistics.
+    """
+    stats = {'total': 0, 'passed': 0, 'failed': 0, 'killed': 0, 'other': 0, 'pass_rate': 0.0}
+    actual_logger = logger_for_internal_errors if logger_for_internal_errors else current_app.logger # Fallback
+    
+    log_func = lambda msg, level="info": (actual_logger.info(msg) if level == "info" else actual_logger.error(msg)) if actual_logger else print(msg)
+
+    if not html_file_path or not os.path.exists(html_file_path):
+        error_msg = f"Error: HTML file path not provided or does not exist for stat calculation: {html_file_path}"
+        if job_id_for_logging: add_output_line_to_job(job_id_for_logging, error_msg)
+        log_func(error_msg, "error")
+        return None
+        
+    try:
+        with open(html_file_path, 'r', encoding='utf-8') as f:
+            soup = BeautifulSoup(f, 'html.parser')
+        
+        table_body = soup.find('table', id='detailedStatusTable').find('tbody')
+        if not table_body:
+            error_msg = f"Error: Could not find table body (tbody with id='detailedStatusTable') in HTML for total stats: {html_file_path}"
+            if job_id_for_logging: add_output_line_to_job(job_id_for_logging, error_msg)
+            log_func(error_msg, "error")
+            return None
+
+        all_rows_in_tbody = table_body.find_all('tr', recursive=False) # Get only direct children <tr>
+        num_total_rows = len(all_rows_in_tbody)
+        rows_to_process = []
+
+        if num_total_rows == 0:
+            if job_id_for_logging: add_output_line_to_job(job_id_for_logging, "Debug_HTML_Stats: No rows found in tbody.")
+            # rows_to_process remains empty
+        elif num_total_rows == 1: # If only 1 row, process it (could be data or the footer itself)
+            rows_to_process = all_rows_in_tbody
+            if job_id_for_logging: add_output_line_to_job(job_id_for_logging, f"Debug_HTML_Stats: Processing the only row (1 total) found in tbody.")
+        else: # num_total_rows > 1, skip only the LAST row
+            rows_to_process = all_rows_in_tbody[:-1] # Process all rows except the last one
+            if job_id_for_logging: 
+                add_output_line_to_job(job_id_for_logging, f"Debug_HTML_Stats: Skipping only the last row. Processing {len(rows_to_process)} of {num_total_rows} total rows.")
+                last_row_text = all_rows_in_tbody[-1].get_text(strip=True, separator='|')[:100]
+                add_output_line_to_job(job_id_for_logging, f"Debug_HTML_Stats: Skipped last row content: {last_row_text}...")
+                # No first row is explicitly skipped here if num_total_rows > 1
+
+        for row_idx, row in enumerate(rows_to_process):
+            td_cells = row.find_all('td')
+
+            if not td_cells:
+                if job_id_for_logging:
+                    row_content_for_log = row.get_text(strip=True, separator='|')[:70]
+                    add_output_line_to_job(job_id_for_logging, f"Debug_HTML_Stats: Row {row_idx} (in selection) has no <td> cells, skipping. Content: {row_content_for_log}...")
+                continue
+            
+            # Assuming the row is a data row based on the new heuristic (position in table)
+            if len(td_cells) > 1: # Need at least two cells for name/status
+                status_text_cell_content = td_cells[1].get_text(strip=True)
+                status_class_list = td_cells[1].get('class', [])
+                if isinstance(status_class_list, str): status_class_list = status_class_list.split()
+
+                final_status_text = status_text_cell_content.upper() 
+                if status_class_list:
+                    for cls in status_class_list:
+                        if cls.startswith('status-'):
+                            status_from_class = cls.split('-',1)[1].upper()
+                            # Be more specific about valid status prefixes from class
+                            if status_from_class in ['P', 'F', 'K', 'U', 'PASSED', 'FAILED', 'KILLED', 'UNKNOWN']: 
+                                final_status_text = status_from_class
+                                break
+                
+                stats['total'] += 1
+                if final_status_text == 'P' or final_status_text == 'PASSED':
+                    stats['passed'] += 1
+                elif final_status_text == 'F' or final_status_text == 'FAILED':
+                    stats['failed'] += 1
+                elif final_status_text == 'K' or final_status_text == 'KILLED': # Assuming K or KILLED for killed status
+                    stats['killed'] += 1
+                else: # Includes UNKNOWN, U, or any other text not matched above
+                    stats['other'] += 1 
+                    if job_id_for_logging:
+                        add_output_line_to_job(job_id_for_logging, f"Debug_HTML_Stats: Case '{td_cells[0].get_text(strip=True)[:50]}...' status '{final_status_text}' (from text: '{status_text_cell_content}', class: '{status_class_list}') categorized as 'Other/Unknown'.")
+            else: 
+                if job_id_for_logging: add_output_line_to_job(job_id_for_logging, f"Debug_HTML_Stats: Valid data row (checkbox found) but <2 cells: {row.get_text(strip=True, separator='|')[:70]}...")
+
+        if stats['total'] > 0:
+            stats['pass_rate'] = (stats['passed'] / stats['total']) * 100
+        
+        if job_id_for_logging: add_output_line_to_job(job_id_for_logging, f"Successfully calculated total stats from {html_file_path}")
+        return stats
+    except Exception as e:
+        error_msg = f"Error calculating total HTML stats from '{html_file_path}': {e}"
+        if job_id_for_logging: add_output_line_to_job(job_id_for_logging, error_msg)
+        log_func(error_msg, "error")
+        import traceback
+        traceback.print_exc() # For server console debugging
+        return None
+
 def long_running_rerun_task(job_id, options, current_app_logger, actual_flask_app_instance): # Added actual_flask_app_instance
     # Raw print to see if the thread function is entered at all
     print(f"[THREAD_DEBUG] long_running_rerun_task entered for job_id: {job_id} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    rerun_log_path = None
+    rerun_log_file_handle = None
+    html_report_actual_path = options.get('html_report_actual_path')
+
+    if html_report_actual_path:
+        try:
+            # Ensure the directory for the HTML report exists before trying to create rerun.log in it
+            html_report_dir = os.path.dirname(html_report_actual_path)
+            if os.path.isdir(html_report_dir): # Check if it's a directory
+                rerun_log_path = os.path.join(html_report_dir, "rerun.log")
+            else:
+                # This case should be rare if html_report_actual_path is a valid file path
+                print(f"Warning: Directory for HTML report '{html_report_dir}' does not exist. Cannot create rerun.log there.")
+                # Optionally log to job status if add_output_line_to_job is available early
+                # add_output_line_to_job(job_id, f"Warning: HTML report directory '{html_report_dir}' invalid. rerun.log disabled.")
+        except Exception as e_path:
+            print(f"Error determining rerun_log_path from '{html_report_actual_path}': {e_path}")
+
 
     # Ensure the entire function is wrapped in a try-except to catch early failures
     try:
         # from backend.app import app as main_flask_app # Removed import, will use passed instance
         print(f"[THREAD_DEBUG] job_id: {job_id} - Using passed actual_flask_app_instance: {actual_flask_app_instance}")
+
+        # Open rerun.log if path is valid
+        if rerun_log_path:
+            try:
+                rerun_log_file_handle = open(rerun_log_path, 'a', encoding='utf-8')
+                rerun_log_file_handle.write(f"\n{'='*20} Rerun Job Log Started: {job_id} at {time.strftime('%Y-%m-%d %H:%M:%S')} {'='*20}\n")
+                rerun_log_file_handle.flush() # Ensure header is written immediately
+            except Exception as e_fopen:
+                print(f"CRITICAL: Failed to open rerun.log at '{rerun_log_path}': {e_fopen}")
+                # add_output_line_to_job(job_id, f"Error: Failed to open rerun.log for writing: {e_fopen}") # Careful with logging before logger is set
+                rerun_log_file_handle = None # Ensure it's None if open failed
 
         with actual_flask_app_instance.app_context(): # Use passed instance
             print(f"[THREAD_DEBUG] job_id: {job_id} - Successfully entered app_context.")
@@ -385,12 +511,17 @@ def long_running_rerun_task(job_id, options, current_app_logger, actual_flask_ap
 
             # If project_root_for_icenv could not be determined, fail the job.
             if not project_root_for_icenv:
-                update_job_status(job_id, "failed", "Critical: Failed to determine project root. A valid 'branchPath' (string containing '/work/') must be provided by the client in the request options.")
+                error_msg_proj_root = "Critical: Failed to determine project root. A valid 'branchPath' (string containing '/work/') must be provided by the client in the request options."
+                update_job_status(job_id, "failed", error_msg_proj_root)
+                if rerun_log_file_handle: rerun_log_file_handle.write(f"ERROR: {error_msg_proj_root}\n")
                 # Specific error logged above, no need for redundant logger_to_use_start.error here.
                 return
             
             # Log the final determined project root (this line was already present and is correct)
-            logger_to_use_start.info(f"Job {job_id}: Successfully determined final project_root_for_icenv: {project_root_for_icenv}")
+            log_msg_proj_root_success = f"Job {job_id}: Successfully determined final project_root_for_icenv: {project_root_for_icenv}"
+            logger_to_use_start.info(log_msg_proj_root_success)
+            if rerun_log_file_handle: rerun_log_file_handle.write(f"INFO: {log_msg_proj_root_success}\n")
+
 
             num_selected_cases = len(options.get('selectedCases', []))
             JOB_STATUS[job_id]['progress_summary'] = {"total_selected": num_selected_cases, "processed_count": 0, "passed_count": 0, "failed_count": 0}
@@ -402,30 +533,52 @@ def long_running_rerun_task(job_id, options, current_app_logger, actual_flask_ap
             try:
                 os.makedirs(temp_rerun_dir, exist_ok=True)
             except Exception as e:
-                update_job_status(job_id, "failed", f"Failed to create temp directory: {e}"); return
+                err_msg_temp_dir = f"Failed to create temp directory: {e}"
+                update_job_status(job_id, "failed", err_msg_temp_dir)
+                if rerun_log_file_handle: rerun_log_file_handle.write(f"ERROR: {err_msg_temp_dir}\n")
+                return
 
             ip_derivation_path = options.get('branchPath')
             if not ip_derivation_path:
-                update_job_status(job_id, "failed", "Branch path (for IP derivation) not provided."); return
+                err_msg_ip_path = "Branch path (for IP derivation) not provided."
+                update_job_status(job_id, "failed", err_msg_ip_path)
+                if rerun_log_file_handle: rerun_log_file_handle.write(f"ERROR: {err_msg_ip_path}\n")
+                return
             derived_ip_name = None
             try:
                 ip_folder_name = os.path.basename(ip_derivation_path)
                 derived_ip_name = ip_folder_name.split('-', 1)[0]
                 if not derived_ip_name: raise ValueError("Derived IP name is empty.")
             except Exception as e:
-                update_job_status(job_id, "failed", f"Failed to derive IP name from branch path: {ip_derivation_path}. Error: {e}"); return
+                err_msg_ip_derive = f"Failed to derive IP name from branch path: {ip_derivation_path}. Error: {e}"
+                update_job_status(job_id, "failed", err_msg_ip_derive)
+                if rerun_log_file_handle: rerun_log_file_handle.write(f"ERROR: {err_msg_ip_derive}\n")
+                return
 
             ip_names_to_process = {derived_ip_name}
             generated_hjson_paths_map = {}
             all_hjson_prepared_successfully = True
             for ip_name in ip_names_to_process:
-                hjson_path = prepare_rerun_hjson_files(project_root_for_icenv, options, temp_rerun_dir, ip_name)
+                hjson_path = prepare_rerun_hjson_files(project_root_for_icenv, options, temp_rerun_dir, ip_name) # This function logs to job_id internally
                 if hjson_path: generated_hjson_paths_map[ip_name] = hjson_path
-                else: all_hjson_prepared_successfully = False; break
-            if not all_hjson_prepared_successfully: update_job_status(job_id, "failed", "HJSON prep failed."); return
-            if not generated_hjson_paths_map: update_job_status(job_id, "failed", "No HJSON files generated."); return
-
-            update_job_status(job_id, "hjson_prepared", "HJSON files prepared. Starting MSIM...")
+                else: all_hjson_prepared_successfully = False; break # prepare_rerun_hjson_files should log its own errors to job_id
+            
+            if not all_hjson_prepared_successfully:
+                # Error already logged by prepare_rerun_hjson_files to job_id, and potentially to rerun.log if that function is modified too.
+                # For now, just update status and log here.
+                err_msg_hjson_prep = "HJSON prep failed for one or more IPs."
+                update_job_status(job_id, "failed", err_msg_hjson_prep)
+                if rerun_log_file_handle: rerun_log_file_handle.write(f"ERROR: {err_msg_hjson_prep} (check job output for details from prepare_rerun_hjson_files)\n")
+                return
+            if not generated_hjson_paths_map:
+                err_msg_no_hjson = "No HJSON files generated (or no IPs to process)."
+                update_job_status(job_id, "failed", err_msg_no_hjson)
+                if rerun_log_file_handle: rerun_log_file_handle.write(f"ERROR: {err_msg_no_hjson}\n")
+                return
+            
+            status_msg_hjson_done = "HJSON files prepared. Starting Git Pull..." # Changed next step
+            update_job_status(job_id, "hjson_prepared", status_msg_hjson_done)
+            if rerun_log_file_handle: rerun_log_file_handle.write(f"INFO: {status_msg_hjson_done}\n")
             # ... (msim command parts assembly as before) ...
             prepared_hjson_actual_path = list(generated_hjson_paths_map.values())[0]
             msim_command_parts = ["msim", "rerun", "-t", "rerun"]
@@ -488,50 +641,50 @@ def long_running_rerun_task(job_id, options, current_app_logger, actual_flask_ap
                 f"git pull"
             )
             add_output_line_to_job(job_id, f"Executing Git pull (CWD: {git_pull_dir}): {git_pull_shell_command}")
+            if rerun_log_file_handle: rerun_log_file_handle.write(f"INFO: Executing Git pull (CWD: {git_pull_dir}): {git_pull_shell_command}\n")
             logger_to_use_start.info(f"Job {job_id}: Executing Git pull command: {git_pull_shell_command} in CWD: {git_pull_dir}")
 
             git_pull_success = False
             try:
                 process_git_pull = subprocess.Popen(git_pull_shell_command,
-                                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, # Merge stderr to stdout
                                                  text=True, bufsize=1, universal_newlines=True,
-                                                 shell=True, executable='tcsh', cwd=git_pull_dir) # git_pull_dir is project_root_for_icenv
+                                                 shell=True, executable='tcsh', cwd=git_pull_dir)
                 if process_git_pull.stdout:
                     for line in iter(process_git_pull.stdout.readline, ''):
-                        # print(f"GitPull STDOUT for {job_id}: {line.strip()}", flush=True) # Server console log
-                        add_output_line_to_job(job_id, f"[GIT PULL] {line.strip()}")
+                        stripped_line = line.strip()
+                        add_output_line_to_job(job_id, f"[GIT PULL] {stripped_line}")
+                        if rerun_log_file_handle: rerun_log_file_handle.write(f"[GIT PULL] {stripped_line}\n")
                     process_git_pull.stdout.close()
 
                 git_pull_return_code = process_git_pull.wait()
-                git_pull_stderr_output = ""
-                if process_git_pull.stderr:
-                    git_pull_stderr_output = process_git_pull.stderr.read()
-                    process_git_pull.stderr.close()
-                    if git_pull_stderr_output:
-                        add_output_line_to_job(job_id, "Git Pull Stderr:")
-                        for line_err in git_pull_stderr_output.splitlines():
-                            add_output_line_to_job(job_id, line_err.strip())
+                # stderr is merged, so no separate stderr reading here.
                 
                 if git_pull_return_code == 0:
-                    add_output_line_to_job(job_id, "Git pull successful.")
+                    msg_git_ok = "Git pull successful."
+                    add_output_line_to_job(job_id, msg_git_ok)
+                    if rerun_log_file_handle: rerun_log_file_handle.write(f"INFO: {msg_git_ok}\n")
                     logger_to_use_start.info(f"Job {job_id}: Git pull successful.")
                     git_pull_success = True
                 else:
                     error_message_git_pull = f"Git pull failed with return code {git_pull_return_code}."
                     add_output_line_to_job(job_id, error_message_git_pull)
+                    if rerun_log_file_handle: rerun_log_file_handle.write(f"ERROR: {error_message_git_pull}\n") # Log combined output already handled
                     logger_to_use_start.error(f"Job {job_id}: {error_message_git_pull}")
-                    update_job_status(job_id, "failed", error_message_git_pull, stderr=git_pull_stderr_output if git_pull_stderr_output else "No stderr from git pull.")
+                    update_job_status(job_id, "failed", error_message_git_pull) # stderr already part of stdout
                     return # Exit task
 
             except FileNotFoundError:
                 error_message_fnf_git = "Shell (tcsh) or git command not found during git pull. Ensure tcsh and git are accessible in PATH."
                 add_output_line_to_job(job_id, f"Error: {error_message_fnf_git}")
+                if rerun_log_file_handle: rerun_log_file_handle.write(f"ERROR: {error_message_fnf_git}\n")
                 logger_to_use_start.error(f"Job {job_id}: {error_message_fnf_git}")
                 update_job_status(job_id, "failed", error_message_fnf_git)
                 return
             except Exception as e_git_pull:
                 error_message_exc_git = f"An error occurred during git pull: {e_git_pull}"
                 add_output_line_to_job(job_id, f"Error: {error_message_exc_git}")
+                if rerun_log_file_handle: rerun_log_file_handle.write(f"ERROR: {error_message_exc_git}\n")
                 logger_to_use_start.error(f"Job {job_id}: {error_message_exc_git}", exc_info=True)
                 update_job_status(job_id, "failed", error_message_exc_git)
                 return
@@ -542,34 +695,41 @@ def long_running_rerun_task(job_id, options, current_app_logger, actual_flask_ap
                 return
 
             # --- Stage 2: Prepare HJSON files (uses updated files from git pull) ---
-            update_job_status(job_id, "preparing_hjson", "Preparing HJSON files (post git pull)...")
+            status_msg_hjson_prep_post_git = "Preparing HJSON files (post git pull)..."
+            update_job_status(job_id, "preparing_hjson", status_msg_hjson_prep_post_git)
+            if rerun_log_file_handle: rerun_log_file_handle.write(f"INFO: {status_msg_hjson_prep_post_git}\n")
             logger_to_use_start.info(f"Job {job_id}: Starting HJSON preparation after successful git pull.")
-            # temp_rerun_dir and derived_ip_name are already available from earlier in the function.
-            # ip_names_to_process is also available.
             
-            generated_hjson_paths_map = {}
-            all_hjson_prepared_successfully = True
-            for ip_name_hjson_prep in ip_names_to_process:
-                hjson_path = prepare_rerun_hjson_files(project_root_for_icenv, options, temp_rerun_dir, ip_name_hjson_prep)
-                if hjson_path:
-                    generated_hjson_paths_map[ip_name_hjson_prep] = hjson_path
+            generated_hjson_paths_map_post_git = {} # Use a new map name to avoid confusion
+            all_hjson_prepared_successfully_post_git = True
+            for ip_name_hjson_prep_pg in ip_names_to_process: # ip_names_to_process is defined before git pull
+                hjson_path_pg = prepare_rerun_hjson_files(project_root_for_icenv, options, temp_rerun_dir, ip_name_hjson_prep_pg)
+                if hjson_path_pg:
+                    generated_hjson_paths_map_post_git[ip_name_hjson_prep_pg] = hjson_path_pg
                 else:
-                    all_hjson_prepared_successfully = False
-                    logger_to_use_start.error(f"Job {job_id}: HJSON preparation failed for IP: {ip_name_hjson_prep}")
-                    break # Stop processing further IPs if one fails
+                    all_hjson_prepared_successfully_post_git = False
+                    # prepare_rerun_hjson_files logs its own errors to job_id. We log to rerun.log here.
+                    err_msg_hjson_prep_pg = f"HJSON preparation failed for IP: {ip_name_hjson_prep_pg} (post git pull)."
+                    if rerun_log_file_handle: rerun_log_file_handle.write(f"ERROR: {err_msg_hjson_prep_pg}\n")
+                    logger_to_use_start.error(f"Job {job_id}: {err_msg_hjson_prep_pg}")
+                    break 
             
-            if not all_hjson_prepared_successfully:
-                update_job_status(job_id, "failed", "HJSON preparation failed for one or more IPs.")
-                # Consider cleaning up temp_rerun_dir here if needed
+            if not all_hjson_prepared_successfully_post_git:
+                err_msg_hjson_fail_pg = "HJSON preparation failed for one or more IPs (post git pull)."
+                update_job_status(job_id, "failed", err_msg_hjson_fail_pg)
+                # rerun.log already has specific IP failure if any.
                 return
-            if not generated_hjson_paths_map: # Should be caught by above if loop runs but nothing generated
-                update_job_status(job_id, "failed", "No HJSON files were generated after git pull (or no IPs to process).")
+            if not generated_hjson_paths_map_post_git:
+                err_msg_no_hjson_pg = "No HJSON files were generated after git pull (or no IPs to process)."
+                update_job_status(job_id, "failed", err_msg_no_hjson_pg)
+                if rerun_log_file_handle: rerun_log_file_handle.write(f"ERROR: {err_msg_no_hjson_pg}\n")
                 return
 
             # --- Stage 3: MSIM Execution ---
-            update_job_status(job_id, "hjson_prepared", "HJSON files prepared. Starting MSIM...")
+            status_msg_msim_start = "HJSON files prepared. Starting MSIM..."
+            update_job_status(job_id, "hjson_prepared", status_msg_msim_start) # Status indicates HJSON is done, msim is next
+            if rerun_log_file_handle: rerun_log_file_handle.write(f"INFO: {status_msg_msim_start}\n")
             logger_to_use_start.info(f"Job {job_id}: HJSON files prepared. Assembling MSIM command.")
-            # msim_executable_and_args is already constructed earlier and contains only the msim command parts.
             
             msim_shell_command = (
                 f"source ~/.cshrc && "
@@ -577,61 +737,66 @@ def long_running_rerun_task(job_id, options, current_app_logger, actual_flask_ap
                 f"{module_load_command} && "
                 f"echo 'DIAG_TRACE: Checking PRJ_ICDIR before msim execution.' && "
                 f"echo 'DIAG_PRJ_ICDIR_VALUE: '$PRJ_ICDIR && "
-                f"{msim_executable_and_args}"
+                f"{msim_executable_and_args}" # msim_executable_and_args is defined before git pull stage
             )
-            # Update job status with only the msim command part for clarity in UI
             update_job_status(job_id, "running_msim", f"Executing MSIM command in {git_pull_dir}...", 
                               command=f"{msim_executable_and_args} (executed in {git_pull_dir} after icenv setup with PRJ_ICDIR diagnostic)")
-            add_output_line_to_job(job_id, f"Executing MSIM (CWD: {git_pull_dir}): {msim_shell_command}")
-            add_output_line_to_job(job_id, "This may take some time...")
+            
+            msim_exec_log_msg1 = f"Executing MSIM (CWD: {git_pull_dir}): {msim_shell_command}"
+            msim_exec_log_msg2 = "This may take some time..."
+            add_output_line_to_job(job_id, msim_exec_log_msg1)
+            add_output_line_to_job(job_id, msim_exec_log_msg2)
+            if rerun_log_file_handle: 
+                rerun_log_file_handle.write(f"INFO: {msim_exec_log_msg1}\n")
+                rerun_log_file_handle.write(f"INFO: {msim_exec_log_msg2}\n")
             logger_to_use_start.info(f"Job {job_id}: Executing MSIM command: {msim_shell_command} in CWD: {git_pull_dir}")
 
             process_return_code = None 
-            process_stderr_output = ""
-            msim_stdout_start_index = len(JOB_STATUS[job_id].get("output_lines", [])) # For isolating MSIM stdout
+            msim_stdout_start_index = len(JOB_STATUS[job_id].get("output_lines", [])) 
 
-            try: # INNER TRY for MSIM subprocess.Popen
-                add_output_line_to_job(job_id, "Using inherited environment for MSIM subprocess.")
-                add_output_line_to_job(job_id, f"Attempting to execute MSIM shell command with tcsh. Ensure 'tcsh' is in the inherited PATH.")
+            try: 
+                add_output_line_to_job(job_id, "Using inherited environment for MSIM subprocess.") # This line will also go to rerun.log if handled by a wrapper
+                if rerun_log_file_handle: rerun_log_file_handle.write("INFO: Using inherited environment for MSIM subprocess.\n")
+                
+                msim_attempt_msg = f"Attempting to execute MSIM shell command with tcsh. Ensure 'tcsh' is in the inherited PATH."
+                add_output_line_to_job(job_id, msim_attempt_msg)
+                if rerun_log_file_handle: rerun_log_file_handle.write(f"INFO: {msim_attempt_msg}\n")
 
                 process_msim = subprocess.Popen(msim_shell_command,
-                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, # Merge stderr to stdout
                                              text=True, bufsize=1, universal_newlines=True,
-                                             shell=True, executable='tcsh', cwd=git_pull_dir) # git_pull_dir is project_root_for_icenv
+                                             shell=True, executable='tcsh', cwd=git_pull_dir) 
 
                 if process_msim.stdout:
                     for line in iter(process_msim.stdout.readline, ''):
-                        # print(f"MSIM STDOUT for {job_id}: {line.strip()}", flush=True) # Server console log
-                        add_output_line_to_job(job_id, line.strip()) # Add raw line, parsing will handle UVM_TEST_DONE
+                        stripped_line = line.strip() 
+                        add_output_line_to_job(job_id, stripped_line) 
+                        if rerun_log_file_handle: rerun_log_file_handle.write(stripped_line + "\n")
                     process_msim.stdout.close()
 
                 process_return_code = process_msim.wait()
-
-                if process_msim.stderr:
-                    process_stderr_output = process_msim.stderr.read()
-                    process_msim.stderr.close()
-                    if process_stderr_output:
-                        add_output_line_to_job(job_id, "MSIM Shell Stderr:")
-                        for line_err in process_stderr_output.splitlines():
-                            add_output_line_to_job(job_id, line_err.strip())
+                # stderr is merged.
 
                 final_status_key_msim = "completed" if process_return_code == 0 else "failed"
                 final_status_message_msim = f"MSIM run {'completed successfully' if process_return_code == 0 else f'failed with return code {process_return_code}'}."
-                update_job_status(job_id, final_status_key_msim, final_status_message_msim, returncode=process_return_code, stderr=process_stderr_output if process_return_code != 0 else None)
+                update_job_status(job_id, final_status_key_msim, final_status_message_msim, returncode=process_return_code)
                 add_output_line_to_job(job_id, final_status_message_msim)
+                if rerun_log_file_handle: rerun_log_file_handle.write(f"INFO: {final_status_message_msim}\n")
                 logger_to_use_start.info(f"Job {job_id}: {final_status_message_msim}")
 
             except FileNotFoundError:
-                process_return_code = -1 # Indicate failure
+                process_return_code = -1 
                 error_message_fnf_msim = "Shell (tcsh) or msim command not found. Ensure tcsh and msim are accessible."
                 add_output_line_to_job(job_id, f"Error: {error_message_fnf_msim}")
+                if rerun_log_file_handle: rerun_log_file_handle.write(f"ERROR: {error_message_fnf_msim}\n")
                 logger_to_use_start.error(f"Job {job_id}: {error_message_fnf_msim}")
                 update_job_status(job_id, "failed", error_message_fnf_msim)
-                return # Exit task
+                return 
             except Exception as e_msim_popen:
-                process_return_code = -1 # Indicate failure
+                process_return_code = -1 
                 error_message_exc_msim = f"An error occurred during MSIM execution: {e_msim_popen}"
                 add_output_line_to_job(job_id, f"Error: {error_message_exc_msim}")
+                if rerun_log_file_handle: rerun_log_file_handle.write(f"ERROR: {error_message_exc_msim}\n")
                 logger_to_use_start.error(f"Job {job_id}: {error_message_exc_msim}", exc_info=True)
                 update_job_status(job_id, "failed", error_message_exc_msim)
                 return # Exit task
@@ -692,68 +857,132 @@ def long_running_rerun_task(job_id, options, current_app_logger, actual_flask_ap
 
             # Update HTML report on disk
             if detailed_results and (JOB_STATUS[job_id]['status'] == "completed" or JOB_STATUS[job_id]['status'] == "failed"):
-                html_report_actual_path_from_options = options.get('html_report_actual_path')
-                if html_report_actual_path_from_options:
-                    add_output_line_to_job(job_id, f"Attempting to update HTML report on disk at: {html_report_actual_path_from_options}")
-                    update_html_report_on_disk(html_report_actual_path_from_options, detailed_results, job_id, project_root_for_icenv, None, derived_ip_name, logger_to_use_start)
+                # html_report_actual_path is already defined at the top of the function
+                if html_report_actual_path: # Use the path determined at the start
+                    msg_html_update = f"Attempting to update HTML report on disk at: {html_report_actual_path}"
+                    add_output_line_to_job(job_id, msg_html_update)
+                    if rerun_log_file_handle: rerun_log_file_handle.write(f"INFO: {msg_html_update}\n")
+                    update_html_report_on_disk(html_report_actual_path, detailed_results, job_id, project_root_for_icenv, None, derived_ip_name, logger_to_use_start)
                 else:
-                    # Fallback to old method if path not in options (though ideally it should always be)
-                    add_output_line_to_job(job_id, "Warning: 'html_report_actual_path' not found in options. Falling back to constructing HTML report path for update.")
-                    original_dir_from_client = options.get('actualWorkDirFromFilePath')
-                    if project_root_for_icenv and original_dir_from_client and derived_ip_name:
-                        update_html_report_on_disk(None, detailed_results, job_id, project_root_for_icenv, original_dir_from_client, derived_ip_name, logger_to_use_start)
-                    else:
-                        add_output_line_to_job(job_id, "Error: Could not update HTML report on disk due to missing parameters for path construction (fallback).")
-                        logger_to_use_start.error(f"Job {job_id}: Failed to update HTML report on disk (fallback) - missing project_root, original_dir, or ip_name.")
+                    # This block for fallback might be less relevant if html_report_actual_path is robustly obtained
+                    msg_html_warn_fallback = "Warning: 'html_report_actual_path' was not available. Cannot update HTML report on disk."
+                    add_output_line_to_job(job_id, msg_html_warn_fallback)
+                    if rerun_log_file_handle: rerun_log_file_handle.write(f"WARN: {msg_html_warn_fallback}\n")
+                    logger_to_use_start.warning(f"Job {job_id}: {msg_html_warn_fallback}")
+            
+            # --- Requirement 2: Log total HTML stats to rerun.log ---
+            if rerun_log_file_handle and html_report_actual_path and os.path.exists(html_report_actual_path):
+                rerun_log_file_handle.write("\nINFO: Calculating total HTML report statistics...\n")
+                total_stats = calculate_total_stats_from_html(html_report_actual_path, job_id, logger_to_use_start)
+                if total_stats:
+                    rerun_log_file_handle.write("\n--- Total HTML Report Status Summary (all cases) ---\n")
+                    rerun_log_file_handle.write(f"Total Cases In HTML: {total_stats['total']}\n")
+                    rerun_log_file_handle.write(f"Passed: {total_stats['passed']} ({total_stats['pass_rate']:.2f}%)\n")
+                    rerun_log_file_handle.write(f"Failed: {total_stats['failed']}\n")
+                    rerun_log_file_handle.write(f"Killed: {total_stats['killed']}\n")
+                    rerun_log_file_handle.write(f"Other/Unknown: {total_stats['other']}\n")
+                    rerun_log_file_handle.write("---------------------------------------------------\n")
+                    rerun_log_file_handle.flush() # Ensure summary is written
+                else:
+                    rerun_log_file_handle.write("ERROR: Failed to calculate total HTML report statistics.\n")
 
-            # ... (find_primary_log_for_rerun calls) ...
             if not log_path_error and proj_root_dir_for_logs and final_msim_dir_option and vcs_context_basename:
                 rerun_output_base_abs = os.path.join(proj_root_dir_for_logs, "work", final_msim_dir_option, vcs_context_basename)
-                find_primary_log_for_rerun(rerun_output_base_abs) # Result not stored, just logged by function
+                find_primary_log_for_rerun(rerun_output_base_abs) 
             elif not log_path_error and proj_root_dir_for_logs and base_log_path_for_html and not final_msim_dir_option :
                 rerun_output_base_abs_fallback = os.path.join(proj_root_dir_for_logs, base_log_path_for_html)
-                find_primary_log_for_rerun(rerun_output_base_abs_fallback) # Result not stored
+                find_primary_log_for_rerun(rerun_output_base_abs_fallback)
 
-            # End of the original main try block's content
-            # except Exception as e_outer: # This was the original main exception handler
-            #     logger_to_use_exc = current_app_logger if current_app_logger else main_flask_app.logger
-            #     logger_to_use_exc.error(f"CRITICAL ERROR IN TASK {job_id} (WITH APP CONTEXT): {str(e_outer)}", exc_info=True)
-            #     update_job_status(job_id, "failed", f"Critical error in task: {str(e_outer)}")
-            #     add_output_line_to_job(job_id, f"CRITICAL_TASK_ERROR: {str(e_outer)}")
-            # finally: # This was the original main finally block
-            #     logger_to_use_finally = current_app_logger if current_app_logger else main_flask_app.logger
-            #     logger_to_use_finally.info(f"--- Task ended for job_id: {job_id} (WITH APP CONTEXT) ---")
-
-    # New top-level exception handler for the entire function
     except Exception as e_very_outer:
         error_message_top = f"CRITICAL UNCAUGHT EXCEPTION IN TASK {job_id}: {str(e_very_outer)}"
-        print(f"[THREAD_DEBUG] {error_message_top}") # Raw print for sure
+        print(f"[THREAD_DEBUG] {error_message_top}") 
         import traceback
-        traceback.print_exc() # Print stack trace to console
+        traceback.print_exc() 
 
-        # Try to update job status
         try:
             update_job_status(job_id, "failed", f"Critical uncaught error: {str(e_very_outer)}")
-            if "job_id_for_logging" not in options: options["job_id_for_logging"] = job_id # Ensure it's set
+            if "job_id_for_logging" not in options: options["job_id_for_logging"] = job_id 
             add_output_line_to_job(job_id, error_message_top)
             add_output_line_to_job(job_id, traceback.format_exc())
+            if rerun_log_file_handle:
+                rerun_log_file_handle.write(f"CRITICAL_ERROR: {error_message_top}\n")
+                rerun_log_file_handle.write(traceback.format_exc() + "\n")
         except Exception as e_status_update:
             print(f"[THREAD_DEBUG] job_id: {job_id} - Failed to update job status after top-level exception: {str(e_status_update)}")
 
-        # Try to log using a logger if available from the app_context, otherwise just print
         try:
-            with actual_flask_app_instance.app_context(): # Re-establish context if it was lost or never entered
+            with actual_flask_app_instance.app_context(): 
                  logger_final_error = current_app_logger if current_app_logger else actual_flask_app_instance.logger
                  if logger_final_error:
                      logger_final_error.error(f"CRITICAL UNCAUGHT EXCEPTION IN TASK {job_id} (WITH APP CONTEXT): {str(e_very_outer)}", exc_info=True)
         except Exception as e_log_final:
             print(f"[THREAD_DEBUG] job_id: {job_id} - Failed to log final error using app logger: {str(e_log_final)}")
     finally:
-        # This finally block is for the new top-level try
         print(f"[THREAD_DEBUG] long_running_rerun_task finished or exited for job_id: {job_id} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        # Ensure the logger from app_context is used if possible for the final message
+        
+        # --- Prepare Rerun Job Summary for HTML Terminal ---
+        final_job_status_info = JOB_STATUS.get(job_id, {})
+        overall_job_status_str = final_job_status_info.get('status', 'unknown').upper()
+        
+        # Calculate stats for *rerun cases*
+        rerun_stats = {'total': 0, 'passed': 0, 'failed': 0, 'killed': 0, 'other': 0}
+        detailed_results_for_summary = final_job_status_info.get('detailed_test_results', [])
+        if detailed_results_for_summary:
+            for res in detailed_results_for_summary:
+                rerun_stats['total'] += 1
+                status = res.get('status', 'UNKNOWN').upper()
+                if status == 'PASSED' or status == 'P':
+                    rerun_stats['passed'] += 1
+                elif status == 'FAILED' or status == 'F':
+                    rerun_stats['failed'] += 1
+                # Assuming 'KILLED' or 'K' might appear in detailed_results if parsing supports it.
+                # Currently, parse_msim_output_for_test_statuses mainly yields PASSED/FAILED/UNKNOWN.
+                elif status == 'KILLED' or status == 'K': 
+                    rerun_stats['killed'] += 1
+                else:
+                    rerun_stats['other'] += 1
+        
+        # Close log file (still goes to server console for this specific error)
+        log_closed_successfully = False
+        if rerun_log_file_handle:
+            try:
+                rerun_log_file_handle.write(f"{'='*20} Rerun Job Log Ended: {job_id} at {time.strftime('%Y-%m-%d %H:%M:%S')} {'='*20}\n\n")
+                rerun_log_file_handle.close()
+                log_closed_successfully = True
+            except Exception as e_fclose:
+                # This print goes to server console, not HTML terminal
+                print(f"Error closing rerun.log for job {job_id}: {e_fclose}")
+
+        # Send summary to HTML terminal using add_output_line_to_job
+        summary_banner_char = "#"
+        summary_width = 60
+        add_output_line_to_job(job_id, "\n" + summary_banner_char * summary_width)
+        add_output_line_to_job(job_id, summary_banner_char + "R E R U N   J O B   S U M M A R Y".center(summary_width - 2) + summary_banner_char)
+        add_output_line_to_job(job_id, summary_banner_char * summary_width)
+        add_output_line_to_job(job_id, f"Job ID        : {job_id}")
+        add_output_line_to_job(job_id, f"Overall Status: {overall_job_status_str}")
+        
+        add_output_line_to_job(job_id, "--- Rerun Cases Statistics ---")
+        add_output_line_to_job(job_id, f"Total Rerun   : {rerun_stats['total']}")
+        add_output_line_to_job(job_id, f"Passed        : {rerun_stats['passed']}")
+        add_output_line_to_job(job_id, f"Failed        : {rerun_stats['failed']}")
+        add_output_line_to_job(job_id, f"Killed        : {rerun_stats['killed']}") # Will be 0 if not explicitly set
+        add_output_line_to_job(job_id, f"Other/Unknown : {rerun_stats['other']}")
+
+        rerun_log_path_message = "Not generated (HTML report path likely missing or invalid)."
+        if rerun_log_path:
+            if log_closed_successfully:
+                rerun_log_path_message = f"{rerun_log_path} (Closed)"
+            elif os.path.exists(rerun_log_path):
+                rerun_log_path_message = f"{rerun_log_path} (Exists, closure status uncertain for this run)"
+            else:
+                rerun_log_path_message = f"{rerun_log_path} (Intended, check creation/write errors)"
+        add_output_line_to_job(job_id, f"Rerun Log File: {rerun_log_path_message}")
+        add_output_line_to_job(job_id, summary_banner_char * summary_width + "\n")
+
+        # Original server console logging for task exit
         try:
-            with actual_flask_app_instance.app_context(): # Re-establish context
+            with actual_flask_app_instance.app_context(): 
                  logger_final_exit = current_app_logger if current_app_logger else actual_flask_app_instance.logger
                  if logger_final_exit:
                     logger_final_exit.info(f"--- Task processing truly finished for job_id: {job_id} (WITH APP CONTEXT) ---")
